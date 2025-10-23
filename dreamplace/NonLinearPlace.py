@@ -952,7 +952,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         )
         if pin_metrics:
             logging.info(
-                "Pin utilization overflow ratio: %.4f, Max pin overflow: %.4f",
+                "Pin utilization overflow ratio: %.4f, Max pin utilization: %.4f",
                 pin_metrics["avg_overflow"],
                 pin_metrics["max_util"],
             )
