@@ -1,0 +1,1229 @@
+748 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 40, NO. 4, APRIL 2021
+DREAMPlace: Deep Learning Toolkit-Enabled
+GPU Acceleration for Modern VLSI Placement
+Yibo Lin ,Member, IEEE , Zixuan Jiang, Graduate Student Member, IEEE ,
+Jiaqi Gu ,Graduate Student Member, IEEE , Wuxi Li ,Member, IEEE , Shounak Dhar, Member, IEEE ,
+Haoxing Ren, Senior Member, IEEE , Brucek Khailany, Senior Member, IEEE , and David Z. Pan ,Fellow, IEEE
+Abstract —Placement for very large-scale integrated (VLSI)
+circuits is one of the most important steps for design clo-sure. We propose a novel GPU-accelerated placement frameworkDREAMPlace, by casting the analytical placement problemequivalently to training a neural network. Implemented on
+top of a widely adopted deep learning toolkit PyTorch , with
+customized key kernels for wirelength and density computa-tions, DREAMPlace can achieve around 40 ×speedup in global
+placement without quality degradation compared to the state-of-the-art multithreaded placer RePlAce. We believe this work shallopen up new directions for revisiting classical EDA problems withadvancements in AI hardware and software.
+Index Terms —Deep learning, GPU acceleration, physical des-
+gin, VLSI placement.
+I. I NTRODUCTION
+PLACEMENT is a critical but time-consuming step in
+the very large-scale integrated (VLSI) design ﬂow. As
+it determines the locations of standard cells in the physicallayout, its quality has signiﬁcant impacts on the later stages
+in the ﬂow, such as routing and post-layout optimization. A
+placement solution also provides relatively accurate estimationto routed wirelength and congestion, which is very valuable
+in guiding the earlier stages like logic synthesis. Commercial
+design ﬂows often run core placement engines many timesto achieve design closure. As placement involves large-scale
+numerical optimization, today’s placers usually take hours for
+large designs, thus, slowing down design iterations. Therefore,ultrafast yet high-quality placement is always desired.
+Manuscript received September 16, 2019; revised January 9, 2020, April
+5, 2020, and June 9, 2020; accepted June 12, 2020. Date of publication
+June 22, 2020; date of current version March 19, 2021. This work was sup-ported in part by NVIDIA. This article was recommended by Associate EditorI. H.-R. Jiang. (Corresponding author: Yibo Lin.)
+Yibo Lin is with the Center for Energy-Efﬁcient Computing and
+Applications, School of EECS, Peking University, Beijing 100871, China(e-mail: yibolin@pku.edu.cn).
+Zixuan Jiang, Jiaqi Gu, and David Z. Pan are with the Department of
+Electrical and Computer Engineering, University of Texas at Austin, Austin,
+TX 78712 USA.
+Wuxi Li is with the FPGA Implementation Software Group, Xilinx Inc.,
+San Jose, CA 95124 USA.
+Shounak Dhar is with the Programmable Solutions Group, Intel
+Corporation, San Jose, CA 95134 USA.
+Haoxing Ren and Brucek Khailany are with NVIDIA, Austin, TX 78717
+USA.
+Digital Object Identiﬁer 10.1109/TCAD.2020.3003843Analytical placement is the current state-of-the-art for
+VLSI placement [1]–[15]. It essentially solves a nonlinearoptimization problem. Although analytical placement can pro-
+duce high-quality solutions, it is also known to be relatively
+slow [11], [13], [14], [16]. Here, we provide a brief introduc-tion to the analytical placement problem. Suppose a circuit
+is described as a hypergraph H=(V,E), where Vdenotes
+the set of vertices (cells) and Edenotes the set of hyperedges
+(nets). Let x,ydenote the locations of cells. The objective of
+analytical placement is to determine the locations of cells with
+wirelength minimized and no overlap in the layout.
+Analytical placement can be roughly categorized into
+quadratic placement and nonlinear placement. Quadratic place-ment tackles the problem by iterating between an uncon-
+strained wirelength minimization step and a rough legal-
+ization (LG) or spreading step [10]–[15]. The wirelengthminimization step usually adopts a quadratic wirelength model
+and minimizes the total wirelength regardless of the overlaps
+between cells. The rough LG step removes the overlaps basedon heuristic approaches without explicit consideration of the
+wirelength cost. By iterating between these two steps, cells
+can be gradually spread out. Meanwhile, the wirelength cost isminimized. Nonlinear placement directly solves the placement
+problem with nonlinear optimization techniques [1]–[9], [17].
+It formulates a nonlinear optimization problem with a wire-length objective subjecting to a density constraint. By relaxing
+the density constraint into the objective, gradient descent-
+based techniques can be adopted to search for a high-quality
+solution. In this article, we focus on the nonlinear place-
+ment approach, as many commercial tools like CadenceInnovus [18] and Synopsys IC Compiler [19] adopt that.
+To accelerate placement, existing parallelization efforts have
+mostly targeted multithreaded CPUs using partitioning [16],[20], [21]. As the number of threads increases, speedup
+quickly saturates at around 5 ×in global placement (GP) with
+typical quality degradation of 2%–6%. Cong and Zou [22]explored GPU acceleration for analytical placement. They
+combined clustering and declustering with nonlinear place-
+ment optimization. By parallelizing the nonlinear placementpart, an average of 15 ×speedup in GP was reported with less
+than 1% quality degradation. Lin and Wong [23] proposed
+GPU acceleration techniques for wirelength gradient compu-tation and area accumulation, but their experiments failed to
+consider real operations, such as density cost computation,
+0278-0070 c/circlecopyrt2020 IEEE. Personal use is permitted, but republication/redistribution requires IEEE permission.
+See https://www.ieee.org/publications/rights/index.html for more information.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+LIN et al. : DREAMPlace: DEEP LEARNING TOOLKIT-ENABLED GPU ACCELERATION FOR MODERN VLSI PLACEMENT 749
+(a) (b)
+Fig. 1. Analogy between neural network training and analytical placement.
+(a) Train a network for weights w. (b) Solve a placement for cell locations
+w=(x,y).
+and it lacked the validation from real analytical placement
+ﬂows. In addition, current research on placement is facing
+challenges in the lack of well-maintained public frameworks
+and the high development overhead, raising the bar to validatenew algorithms systematically.
+In this work, we propose DREAMPlace , a GPU-accelerated
+analytical placer developed with deep learning toolkitPyTorch [24] by casting an analytical placement problem
+to training a neural network. DREAMPlace is based on the
+state-of-the-art analytical placement algorithm ePlace/RePlAcefamily [6], [8], but the framework is designed in a generic
+way that is compatible with other analytical placers such
+as NTUplace [4]. The key contributions are summarized asfollows.
+1) We take a totally new perspective of making an anal-
+ogy between placement and deep learning, and build
+an open-source generic analytical placement framework
+that runs on both CPU and GPU platforms developedwith modern deep learning toolkits.
+2) A variety of gradient-descent solvers are provided, such
+as Nesterov’s method, conjugate gradient method, andAdam [25], with the help from deep learning toolkit.
+3) We propose efﬁcient GPU implementations of key ker-
+nels in analytical placement like wirelength and densitycomputation.
+4) We demonstrate around 40 ×speedup in GP without
+quality degradation of the entire placement ﬂow overmultithreaded RePlAce implementations. More specif-
+ically, a design with one million cells ﬁnishes in one
+minute even with LG. The framework maintains nearlylinear scalability with industrial designs up to 10-million
+cells.
+The source code is released on Github.
+1To clarify, the cast-
+ing of placement problem to deep learning problems aims
+at using the toolkit to solve placement, which is orthogonalto using deep learning models for placement. The remainder
+of this article is organized as follows. Section II describes
+the background and motivation. Section III explains thedetailed implementation. Section IV demonstrates the results.
+Section V concludes this article.
+1https://github.com/limbo018/DREAMPlaceII. P RELIMINARIES
+This section will review the background and motivation.
+A. Analytical Placement
+Analytical placement usually consists of three steps: 1) GP;
+2) LG; and 3) detailed placement (DP). GP spreads out cells
+in the layout with a target cost minimized; LG removes the
+remaining overlaps between cells and aligns cells to place-ment sites; and DP performs incremental reﬁnement to further
+improve the quality. Usually, GP is the most time-consuming
+portion in analytical placement.
+GP aims at minimizing the wirelength cost subjecting to
+density constraints. The formulation can be written as follows:
+min
+x,y/summationdisplay
+e∈EWL(e;x,y) (1a)
+s.t.d(x,y)≤dt (1b)
+where WL (·;·)is the wirelength cost function that takes any
+net instance eand returns the wirelength, d(·)is the density
+of a location in the layout, and dtis a given target density. A
+typical solving approach is to relax the density constraints to
+the objective as a density penalty [1], [4], [6]
+minx,y/parenleftBigg/summationdisplay
+e∈EWL(e;x,y)/parenrightBigg
++λD(x,y) (2)
+where D(·)is the density penalty to spread cells out in the
+layout. The density constraints can be satisﬁed by gradually
+increasing the weight of λ.
+B. Analogy to Deep Learning
+As both solving an analytical placement and train-
+ing a neural network are essentially solving a nonlinear
+optimization problem, we investigate the underlying similarity
+between the two problems: 1) the analogy of the wirelengthcost to the error of misprediction and 2) that of the density
+cost to the regularization term. Fig. 1 shows the objective func-
+tions of the two problems. In neural network training, eachdata instance with a feature vector x
+iand a label yiis fed to
+the network, and the neural network predicts a label φ(xi;w).
+The task for training is to minimize the overall objective overweights w, where the objective consists of the prediction errors
+for all data instances, and a regularization term R(w)[26]. In
+the analogy of placement to neural network training, we com-bine cell locations (x,y)intowfor brevity. Each data instance
+is replaced with a net instance with a feature vector e
+iand a
+label zero. The neural network then takes a net instance andcomputes the wirelength cost WL (e
+i;w). Using the absolute
+error function f(ˆy,y)=| ˆy−y|and noting that wirelength is
+non-negative, the minimization of prediction errors becomes/summationtextn
+iWL(ei;w). The density cost D(w)corresponds to the reg-
+ularization term R(w), as it is not related to net instances.
+With this construction, we ﬁnd a one-to-one mapping of each
+component in analytical placement to neural network training,
+which makes it possible to take advantage of recent develop-ments in deep learning toolkits for implementation. Then, we
+can solve the placement problem following the neural network
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+750 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 40, NO. 4, APRIL 2021
+(a) (b)
+Fig. 2. (a) Software architecture for placement implementation using deep
+learning toolkits. (b) DREAMPlace ﬂow.
+training procedure, with forward propagation to compute the
+objective and backward propagation to calculate the gradient.
+Deep learning toolkits nowadays consist of three stacks,
+low-level operators (OPs), automatic gradient derivation, and
+optimization engines, as shown in Fig. 2(a). Toolkits like
+TensorFlow andPyTorch offer mature and efﬁcient
+implementation of these three stacks with compatibility to
+both CPU and GPU acceleration. The toolkits also provideconvenient APIs to extend the existing set of low-level OPs.
+Each custom OP requires well deﬁned forward and back-
+ward functions for cost and gradient computation. To developan analytical placement with deep learning toolkits, we only
+need to implement the custom OPs for wirelength and density
+cost in C ++ and CUDA. Then we can construct a placement
+framework in Python with very low development overhead
+and easily incorporate a variety of optimization engines in
+the toolkit. The placement framework can run on both CPUand GPU platforms. The conventional development of place-
+ment engines takes huge efforts in building the entire software
+stacks with C ++. Thus, the bar of designing and validating
+a new placement algorithm is very high due to the develop-
+ment overhead. Taking advantage of deep learning toolkits,
+researchers can concentrate on the development of critical
+parts like low-level OPs and high-level optimization engines.
+C. ePlace/RePlAce Algorithm
+ePlace/RePlAce is a state-of-the-art family of GP algo-
+rithms that model the layout and netlist as an electrostatic
+system [6]–[8]. It uses weighted-average wirelength (WA) for
+wirelength cost originally proposed by [27], [28]
+WA
+e=/summationtext
+i∈exiexi
+γ
+/summationtext
+i∈eexi
+γ−/summationtext
+i∈exie−xi
+γ
+/summationtext
+i∈ee−xi
+γ(3)
+where γis a parameter to control the smoothness and accuracy
+of the approximation to half-perimeter wirelength (HPWL).
+The smaller γis, the more accurate it is to approximate
+HPWL, but the less smooth.
+Its density penalty is quite different from other analytical
+placers [1], [3], [4]. With analogy to an electrostatic system,
+cells are modeled as charges, density penalty is modeled aspotential energy, and the density gradient is modeled as the
+electric ﬁeld. The electric potential and ﬁeld distribution can(a) (b)
+Fig. 3. RePlAce [8] runtime breakdown in percentages on bigblue4
+(2 million cells). (a) One thread. (b) Ten threads.
+be computed by solving Poisson’s equation from the charge
+density distribution
+∇·∇ψ(x,y)=−ρ(x,y) (4a)
+ˆn·∇ψ(x,y)=0,(x,y)∈∂R (4b)/integraldisplay/integraldisplay
+Rρ(x,y)=/integraldisplay/integraldisplay
+Rψ(x,y)=0 (4c)
+where Rdenotes the placement region, ∂Rdenotes the bound-
+ary to the region, ˆndenotes the outer normal vector of the
+placement region, ρdenotes the charge density, and ψdenotes
+the electric potential.
+The numerical solution of Poisson’s equation can be
+obtained with spectral methods. Given an M×Mgrid of
+bins and wu=(2πu/M)and wv=(2πv/M)with u=
+0,1,..., M−1,v=0,1,..., M−1, the solution can be
+computed as follows [6]:
+au,v=1
+M2M−1/summationdisplay
+x=0M−1/summationdisplay
+y=0ρ(x,y)cos(wux)cos(wvy)(5a)
+ψDCT(x,y)=M−1/summationdisplay
+u=0M−1/summationdisplay
+v=0au,v
+w2u+w2vcos(wux)cos(wvy)(5b)
+ξX
+DSCT(x,y)=M−1/summationdisplay
+u=0M−1/summationdisplay
+v=0au,vwu
+w2u+w2vsin(wux)cos(wvy) (5c)
+ξY
+DCST(x,y)=M−1/summationdisplay
+u=0M−1/summationdisplay
+v=0au,vwv
+w2u+w2vcos(wux)sin(wvy) (5d)
+where ψDCT denotes the numerical solution of the potential
+function, and ξX
+DSCTandξY
+DCSTdenote the solution of the
+electric ﬁeld in horizontal and vertical directions, respectively.
+Equation (5) requires discrete Cosine transform (DCT) andinverse DCT (IDCT) routines to solve efﬁciently. The detailed
+computation is explained in Section III. With the electric ﬁeld
+deﬁned for each bin, the density gradient of each cell is theoverall force taken by the cell in the system.
+After deﬁning wirelength cost and density penalty, RePlAce
+adopts gradient-descent optimizers, such as Nesterov’s method
+and conjugate gradient method, to solve the optimization
+problem. RePlAce was implemented with multithreading sup-port [8]. The runtime breakdown for RePlAce [8] is elaborated
+in Fig. 3. GP including initial placement (GP-IP) and nonlinear
+optimization (GP-Nonlinear) takes about 90% of the runtimewith both single thread and 10 threads. Therefore, accelerating
+GP is the most effective in reducing the overall runtime.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+LIN et al. : DREAMPlace: DEEP LEARNING TOOLKIT-ENABLED GPU ACCELERATION FOR MODERN VLSI PLACEMENT 751
+TABLE I
+NOTATIONS
+III. DREAMP LACE ALGORITHMS
+Our overall placement ﬂow is given in Fig. 2(b). It is slightly
+different from the typical one that starts from a bound-to-
+bound initial placement [4], [6]. We observe that starting from
+a random initial placement also achieves the same quality
+(<0.04% difference) with signiﬁcantly less runtime (21.1% in
+Fig. 3). In initial placement, standard cells are placed in thecenter of the layout with a small Gaussian noise. In our exper-
+iments, the scales of the noise are set to 0.1% of the width
+and height of the placement region. The kernel GP iterationsrefer to the loop that involves the computation of wirelength
+and density gradient, optimization engines, and cell location
+updating. After the GP converges, LG is performed to removeremaining overlaps and align cells to placement sites. The last
+step before the output is DP to reﬁne the placement solutions
+relying on NTUplace3 [4]. The rest of this section will focuson GPU acceleration to the ePlace/RePlAce algorithm [6], [8].
+A. Wirelength Forward and Backward
+As RePlAce adopts WA wirelength, we also use it as an
+example for the GPU acceleration to wirelength forward and
+backward. Similar insights also apply to other wirelength costs
+like log-sum-exp (LSE) [29], which is also implemented in theframework. For brevity, we only discuss the equations in the
+xdimension, as those in the ydimension are similar. The real
+implementation will separate the computation for xandyinto
+different GPU streams as they are independent.
+Direct implementation of WA wirelength deﬁned in (3)
+may result in numerical overﬂow, so we convert e
+(xi/γ)to
+e[(xi−max j∈exj)/γ], and e−(xi/γ)toe−[(xi−min j∈exj)/γ]in (3), which
+is an equivalent transformation. With the notations in Table I,the gradient of WA wirelength to a pin location can be
+written as
+∂WL
+e
+∂xi=/parenleftBig
+1+xi
+γ/parenrightBig
+b+
+e−1
+γc+e
+/parenleftbig
+b+e/parenrightbig2·a+
+i
+−/parenleftBig
+1−xi
+γ/parenrightBig
+b−
+e+1
+γc−e
+/parenleftbig
+b−e/parenrightbig2·a−
+i. (6)
+A native parallelization scheme is to allocate one thread
+for each net. This scheme has also been discussed in [23],which only demonstrated limited speedup because the maxi-
+mum number of threads to allocate is |E|, and the workloadAlgorithm 1 Wirelength Forward and Backward Atomic [30]
+Require: A set of nets E, a set of pins P, and pin locations x;
+Ensure: Wirelength cost and gradient;
+1:function FORWARD (E,P,x)
+2: x+←− ∞ ,x−←∞ ,b±←0,c±←0;
+3: foreach thread 0 ≤t<|P|do ⊿x±kernel
+4: Deﬁne eas the net that pin tbelongs to;
+5: x+eat.←−max(x+e,xt); ⊿atomic max
+6: x−eat.←−min(x−e,xt); ⊿atomic min
+7: end for
+8: foreach thread 0 ≤t<|P|do ⊿a±kernel
+9: Deﬁne eas the net that pin tbelongs to;
+10: a±
+t←e±xt−x±e
+γ;
+11: end for
+12: foreach thread 0 ≤t<|P|do ⊿b±kernel
+13: Deﬁne eas the net that pin tbelongs to;
+14: b±eat.←−b±e+a±
+t; ⊿atomic add
+15: end for
+16: foreach thread 0 ≤t<|P|do ⊿c±kernel
+17: Deﬁne eas the net that pin tbelongs to;
+18: c±eat.←−c±e+xta±
+t; ⊿atomic add
+19: end for
+20: foreach thread 0 ≤t<|E|do ⊿WLekernel
+21: Deﬁne eastthnet in E;
+22: Compute WL e←c+
+e
+b+e−c−
+e
+b−e;
+23: end for
+24: return reduce (/summationtext
+e∈EWLe),a±,b±,c±;
+25:end function
+26:function BACKWARD (E,P,x,a±,b±,c±)
+27: foreach thread 0 ≤t<|P|do ⊿∂WL e
+∂xtkernel
+28: Deﬁne eas the net that pin tbelongs to;
+29: Compute∂WL e
+∂xt;
+30: end for
+31: return {∂WL e
+∂xi}∀i∈P;
+32:end function
+for each thread is imbalanced due to the heterogeneity of net
+degrees.
+Noting that the total number of pins |P|is much larger than
+|E|, we consider the possibility of pin-level parallelization. The
+dependency graph for WA wirelength forward and backward
+is elaborated in Fig. 4(a). A straight-forward implementation
+of this pin-level parallelism is to compute a±,b±,c±in
+separate CUDA kernels by using multiple CUDA streams.
+The computation can be completed in four steps: 1) com-
+pute x±; 2) compute and store a±; 3) compute and store
+b±,c±; and 4) compute WL ein forward or (∂WL e/∂xi)in
+backward. Algorithm 1 illustrates this multistream version of
+pin-level parallel implementation of WA wirelength forwardand backward functions. We make all the CUDA kernel func-
+tions inline, which should be separate in practice, for brevity.
+Speciﬁcally, computations for an array with different ±signs,
+e.g., x
++andx−, are separated into different CUDA streams in
+the implementation. In the algorithm, six kernels are needed.The x
+±kernel requires atomic maximum and minimum oper-
+ations, and the b±,c±kernels require atomic addition. At the
+end of the forward function, summation reduction is needed tocompute the overall wirelength cost, which is provided by the
+deep learning toolkit. In our implementation, multiple CUDA
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+752 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 40, NO. 4, APRIL 2021
+(a) (b)
+Fig. 4. Forward and backward dependency graph for (a) weighted average
+wirelength and (b) density computation.
+streams are adopted for independent computations, such as x/y
+directions and positive/negative components.
+We observe that Algorithm 1 [30] has several drawbacks:
+expensive CUDA streams, sequential launches of many ker-
+nels, contention, and frequent global memory access. Among
+these drawbacks, frequent global memory access, especiallyfrequent writing to intermediate variables x
+±,a±,b±,c±,
+becomes the major runtime bottleneck. In other words, it is
+memory bounded rather than computation bounded. Thus, we
+review the natural net-by-net and pin-by-pin approaches again.
+We discover that the net-by-net strategy has the potential toremove all the intermediate variables by merging the forward
+and backward functions, as shown in Algorithm 2. Instead
+of storing x
+±,a±,b±,c±in global memory, we only create
+local variables in the kernel function, and directly compute
+the wirelength for each net and the gradient for each pin.
+Although variable a±is computed twice, the store instructions
+only happen to the variables WL eand(∂WL e/∂xp), which sig-
+niﬁcantly alleviate the memory pressure. The efﬁciency of the
+two algorithms is empirically compared in Section IV-B.
+For parallel CPU implementation, we adopt the net-by-
+net strategy and dynamic scheduling for heterogeneous net
+degrees. We observe that a chunk size of (|E|/#threads ×16)
+works well for most designs, where |E|is the number of nets
+in the design.
+B. Density Forward and Backward
+Forward and backward of density cost is a computation-
+intensive procedure. Fig. 4(b) plots the dependency graph for
+density cost forward and backward. The computation consists
+of four steps:
+1) compute density map ρ;
+2) compute au,v;
+3) compute ψin forward or ξin backward;
+4) compute D in forward or (∂D/∂xi)in backward.
+We model this computation ﬂow as a dynamic bipartite graph
+forward and backward process, as shown in Fig. 5. First, den-
+sity map calculation is modeled as a bipartite graph forward or
+a special 2-D histogram problem where one cell may updatemultiple bins [31]. Then the electric potential and ﬁeld are
+solved via DCT and other Fourier-related transforms. Finally,
+the electric force inﬂicted on each cell is collected from itsoverlapped bins, which can be modeled as a 2-D gathering
+problem [31].Algorithm 2 Wirelength Forward and Backward Merged
+Require: A set of nets E, a set of pins P, and pin locations x;
+Ensure: Wirelength cost and gradient;
+1:function FORWARD _BACKWARD (E,P,x)
+2: foreach thread 0 ≤t<|E|do ⊿WLe,∂WL e
+∂xpkernel
+3: Deﬁne eas the net corresponds to thread t;
+4: x+e←max p∈exp; ⊿x±eare local in the kernel
+5: x−e←minp∈exp;
+6: b±e←0,c±e←0; ⊿b±e,c±eare local in the kernel
+7: WLe←0; ⊿WLeis in the global memory
+8: foreach pin p∈edo
+9: a±p←e±xp−x±e
+γ; ⊿a±pis local in the loop
+10: b±e←b±e+a±p;
+11: c±e←c±e+xp·a±p;
+12: end for
+13: WLe←c+
+b+−c−
+b−;
+14: foreach pin p∈edo
+15: a±p←e±xp−x±e
+γ; ⊿Compute a±pagain
+16: Compute∂WL e
+∂xp;⊿∂WL e
+∂xpis in the global memory
+17: end for
+18: end for
+19: return reduce ({WLe}),{∂WL e
+∂xp}∀p∈P,e∈E;
+20:end function
+(a) (b)
+Fig. 5. Computation ﬂow of (a) density map and (b) electric force.
+1) Dynamic Bipartite Graph Forward for Density Map:
+Each step of density map computation updates bins based on
+the overlapping area of corresponding cells. Thus, it can bemodeled as a particular 2-D histogram problem or a dynamic
+bipartite graph forward, as shown in Fig. 5(a). Each edge in the
+bipartite graph represents an update to the entry of the targetbin in the density map, where the edge weight represents the
+overlapping area of the {cell, bin} pair. The reason why we
+call it “dynamic” is that, as cells move, edges in the bipartitegraph, which indicate overlaps between cells and bins, will
+change accordingly.
+A naive algorithm to parallelize this step is to allocate one
+GPU thread for each cell and use atomic addition to accu-
+mulate the overlapping areas with bins [30]. However, as a
+cell may cover multiple bins, simply using one GPU thread to
+update all overlapped bins sequentially will cause load imbal-
+ance problem due to the variety in cell sizes. Empirically,the number of bins covered by a cell can vary from ∼10 to
+∼1000. This ill-balanced workload within a thread warp intro-
+duces a big chunk of idle time and signiﬁcantly degrades theperformance. Therefore, we develop the following techniques
+to address this issue.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+LIN et al. : DREAMPlace: DEEP LEARNING TOOLKIT-ENABLED GPU ACCELERATION FOR MODERN VLSI PLACEMENT 753
+Sort Cells by Area: We sort the standard cells by their areas,
+such that the 32 threads in a warp can process 32 consecutivelyindexed cells with similar sizes. In this way, the cell-level
+workloads will be automatically balanced within a warp.
+Update One Cell With Multiple Threads: We use multiple
+threads to update a single cell, which can effectively reduce the
+workload of each thread. Thus, the issue of load imbalance can
+be further alleviated. An appropriate number of threads need tobe selected given that this ﬁne-grained parallelism inevitably
+introduces some runtime penalty. Speciﬁcally, more computa-
+tional redundancy and memory write contention from atomicoperations will happen among threads updating the same cell.
+We experimentally evaluate different settings of threads. Fig. 6
+shows the comparison on the bigblue4 benchmark. Based
+on the above results, we empirically adopt 2 ×2 threads, i.e., 2
+threads for both vertical and horizontal directions. It providesabout 20%–30% runtime improvement with both float32
+andfloat64 .
+For parallel CPU implementation, we adopt the native
+atomic operations and dynamic scheduling for heterogeneous
+cell sizes. We set the chunk size to (|V|/#threads ×16), where
+|V|is the number of cells in the design.
+2) Dynamic Bipartite Graph Backward for Electric Force:
+In the electric force computation, each cell receives the forces
+from the bins it overlaps with. Thus, the computation can be
+viewed as a 2-D gathering problem or a dynamic bipartite
+graph backward, as shown in Fig. 5(b). Each edge represents
+the force from a bin, and the edge weight is the amount of theforce. The weight is computed as the product of the overlap-
+ping area between the cell and the bin and the electric ﬁeld at
+the bin.
+A natural strategy to accelerate this step is to allocate one
+thread for each cell and accumulate the forces sequentially
+from its overlapping bins [30]. However, considering this com-putation task shares a similar structure with the density map
+computation, we borrow the same idea from Section III-B1 by
+sorting the cells and allocating multiple threads for each cell.
+3) DCT/IDCT for Electric Potential and Field: The electric
+potential and ﬁeld computation in (5) requires fast DCT/IDCT
+kernels for efﬁcient calculation. The standard DCT/IDCT for1-D length- Nsequence xis
+DCT({x
+n})k=N−1/summationdisplay
+n=0xncos/parenleftbiggπ
+N/parenleftbigg
+n+1
+2/parenrightbigg
+k/parenrightbigg
+(7a)
+IDCT({xn})k=1
+2x0+N−1/summationdisplay
+n=1xncos/parenleftbiggπ
+Nn/parenleftbigg
+k+1
+2/parenrightbigg/parenrightbigg
+(7b)
+where k=0,1,..., N−1. We further derive IDXST as
+IDXST ({xn})k=N−1/summationdisplay
+n=0xnsin/parenleftbiggπ
+Nn/parenleftbigg
+k+1
+2/parenrightbigg/parenrightbigg
+(8a)
+=(−1)kN−1/summationdisplay
+n=0xn(−1)ksin⎛
+⎝πn/parenleftBig
+k+1
+2/parenrightBig
+N⎞
+⎠
+(8b)Fig. 6. Comparison of different numbers of threads to update one cell in
+density forward and backward on bigblue4 . The numbers are normalized
+by the runtime of 1 ×1 thread with float64 .
+=(−1)kN−1/summationdisplay
+n=0xncos⎛
+⎝π(N−n)/parenleftBig
+k+1
+2/parenrightBig
+N⎞
+⎠
+(8c)
+=(−1)kN−1/summationdisplay
+n=0xN−ncos/parenleftbiggπ
+Nn/parenleftbigg
+k+1
+2/parenrightbigg/parenrightbigg
+(8d)
+=(−1)kIDCT({xN−n})k (8e)
+where xN=0. The equality between (8d) and (8e) can be
+derived by incorporating xN−ninto (7b). Given an M×M
+density map ρ, the electric potential and ﬁeld can be computed
+using DCT/IDCT, IDXST routines
+au,v=DCT/parenleftbig
+DCT(ρ)T/parenrightbigT(9a)
+ψDCT=IDCT/parenleftBigg
+IDCT/parenleftbigg/braceleftbiggau,v
+w2u+w2v/bracerightbigg/parenrightbiggT/parenrightBiggT
+(9b)
+ξX
+DSCT=IDXST/parenleftBigg
+IDCT/parenleftbigg/braceleftbiggau,vwu
+w2u+w2v/bracerightbigg/parenrightbiggT/parenrightBiggT
+(9c)
+ξY
+DCST=IDCT/parenleftBigg
+IDXST/parenleftbigg/braceleftbiggau,vwv
+w2u+w2v/bracerightbigg/parenrightbiggT/parenrightBiggT
+(9d)
+where (·)Tdenotes matrix transposition. The 2-D DCT/IDCT
+is computed by performing 1-D DCT/IDCT to columns and
+then rows. We can see all the computations can be brokendown into the 1-D DCT/IDCT kernels with proper transforma-
+tions. Thus, highly optimized DCT/IDCT kernels are critical
+to the performance.
+As the highly optimized fast Fourier transform (FFT) is
+provided by many deep learning toolkits, we leverage FFT
+to compute DCT. There are multiple ways to compute DCTusing FFT with linear time additional processing. For exam-
+ple,TensorFlow adopts the implementation using 2 N-point
+FFT. We choose the N-point FFT implementation [32] and
+demonstrate better efﬁciency in the experiments, as shown in
+Algorithm 3. Due to the symmetric property of FFT for real
+input sequences, we utilize one-sided real FFT/IFFT to save
+almost half of the sequence. With additional processing ker-
+nels like linear-time reordering and multiplication, DCT/IDCTcan be computed with an N-point real FFT/IFFT.
+In the placement problem, we need to compute 2-D
+DCT/IDCT. A widely adopted algorithm aforementioned isto perform 1-D DCT/IDCT through the rows and columns
+sequentially [30]. This row-column DCT algorithm is easy to
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+754 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 40, NO. 4, APRIL 2021
+Algorithm 3 DCT/IDCT With N-Point FFT
+Require: An even-length real sequence x;
+Ensure: An even-length transformed real sequence y;
+1:function DCT( x)
+2: N←|x|;
+3: foreach thread 0 ≤t<Ndo ⊿Reorder kernel
+4: ift<N
+2then
+5: x/primet←x2t;
+6: else
+7: x/primet←x2(N−t)−1;
+8: end if
+9: end for
+10: x/prime/prime←RFFT (x/prime); ⊿One-sided real FFT kernel
+11: foreach thread 0 ≤t<Ndo ⊿e−jπt
+2Nkernel
+12: ift≤N
+2then
+13: yt←2
+N/Rfractur(x/prime/primete−jπt
+2N); ⊿get real part
+14: else
+15: yt←2
+N/Rfractur(x/prime/prime
+(N−t)e−jπt
+2N); ⊿get real part
+16: end if
+17: end for
+18: return y;
+19:end function
+20:function IDCT( x)
+21: N←|x|;
+22: foreach thread 0 ≤t<N
+2+1do ⊿Complex kernel
+23: x/primet←(xt−jx(N−t))ejπt
+2N; ⊿letxN←0
+24: end for
+25: x/prime/prime←IRFFT (x/prime); ⊿One-sided real IFFT kernel;
+26: foreach thread 0 ≤t<Ndo ⊿Reverse kernel
+27: iftmod 2 ==0then
+28: yt←N
+4x/prime/prime
+t
+2;
+29: else
+30: yt←N
+4x/prime/prime
+(N−t+1
+2);
+31: end if
+32: end for
+33: return y;
+34:end function
+implement but limited by its two-step procedure, redundant
+computation, and frequent memory transaction. To achieve
+better efﬁciency, we implement 2-D DCT/IDCT directlythrough 2-D FFT, proven in [32]. Algorithm 4 illustrates
+the 2-D DCT/IDCT implementation with 2-D preprocessing
+and post-processing kernels. This implementation eliminates
+unnecessary computations with a one-time call to 2-D FFT
+kernels. The pre- and post-processing routines can be fullyparallelized. This algorithm is adopted for both GPU and CPU
+implementations. We evaluate the efﬁciency of the DCT/IDCT
+transforms and the density OP in Section IV-B.
+C. Density Weight Updating
+We need to update the density weight λin (2) in each
+iteration to penalize the density cost. RePlAce [8] uses thefollowing equations to update λ:
+μ←/braceleftBiggμ
+max, ifp<0
+max/parenleftBig
+μmin,μ1−p
+max/parenrightBig
+,otherwise(18a)
+λ←λ·μ (18b)
+where μmin=0.95,μmax=1.05, and p=(/Delta1HPWL /3.5×
+105). We follow almost the same scheme with one minordifference. When p< 0, we set μ←μmax·
+max(0.9999k,0.98)instead of μmax, where kis the current
+iteration. This equation indicates that from iteration 0 to 200,
+μgradually drops from 1.05 to 1.03 and keeps this value
+afterward, given the previous μmaxsetting. We found that this
+minor change provides relatively stable convergence in our
+experiments.
+D. Optimization Engine
+ePlace/RePlAce [6], [8] uses Nesterov’s method as the
+gradient-descent solver with a Lipschitz-constant approxima-
+tion scheme for line search. We implement the same approachin Python leveraging the efﬁcient API provided by the deep
+learning toolkit. The framework is compatible with other
+well-known solvers in deep learning toolkits, i.e., variousmomentum-based gradient descent algorithms like Adam [25]
+and RMSProp [33], providing additional solver options.
+E. Legalization
+We also develop LG as an OP in DREAMPlace. It ﬁrst
+follows the Tetris-like procedure similar to NTUplace3 [4].
+Then it performs Abacus row-based LG [34]. This step copiesthe cell locations from GPU to CPU and executes LG purely
+on CPU because we observe that it only takes several seconds
+even for million-size designs with a single CPU thread.
+F . Extension to Consider Routability
+To optimize routing congestion, we adopt cell inﬂation to
+optimize congested regions [35]. We follow a similar schemeto RePlAce [8], which invokes the NCTUgr global router [36]
+to get the routing overﬂow map during placement iterations.
+For each metal layer, we compute the ratio between routingdemand and capacity at each routing tile. Then we use the
+maximum ratio across all layers to compute the inﬂation ratio
+for each tile
+ratio=min/parenleftBigg/parenleftbigg
+max
+∀l∈Ldemand l
+capacityl/parenrightbigg2.5
+,2.5/parenrightBigg
+(19)
+where Lis the set of metal layers. The exponent and maxi-
+mum limits can be adjusted according to the benchmarks. We
+choose 2.5 in the experiments. After that, we obtain an inﬂa-tion ratio map. A cell will be inﬂated according to the inﬂation
+ratios of the tiles it overlaps with. If cells inﬂate too much,
+there may not be enough total whitespace to digest the areaincrement. Thus, we limit the area increment to be 10% of the
+total whitespace area in the layout every time. If the attempted
+area increment exceeds this ratio, we uniformly scale down theinﬂation ratio for each cell. During the placement iterations,
+once the cell overﬂow drops to 20%, we invoke the global
+router and perform inﬂation. The overﬂow will increase after
+inﬂation. Then, the solver is restarted to optimize wirelength
+and density again. We keep on looping until the total inﬂationratio is less than 1% of the total cell area, or we reach a max-
+imum of 5 times of inﬂation. Starting from the ﬁrst round of
+cell inﬂation, we slow down the density weight updating tomake the gradient descent more stable. That is, we update the
+density weight λevery 5 iterations instead of every iteration.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+LIN et al. : DREAMPlace: DEEP LEARNING TOOLKIT-ENABLED GPU ACCELERATION FOR MODERN VLSI PLACEMENT 755
+Algorithm 4 2-D DCT, 2-D IDCT, IDCT_IDXST, and IDXST_IDCT with N-Point 2-D FFT
+Require: An real N1×N2matrix x; ⊿N1andN2can be any positive number
+1:function 2D_DCT( x)
+2: x/prime=2d_dct_preprocess (x)using Equation (10),
+x/prime(n1,n2)=⎧
+⎪⎪⎪⎪⎪⎪⎨
+⎪⎪⎪⎪⎪⎪⎩x(2n
+1,2n2), 0/lessorequalslantn1/lessorequalslant/floorleftBigN1−1
+2/floorrightBig
+,0/lessorequalslantn2/lessorequalslant/floorleftBigN2−1
+2/floorrightBig
+x(2N1−2n1−1,2n2),/floorleftBigN1+1
+2/floorrightBig
+/lessorequalslantn1/lessorequalslantN1−1,0/lessorequalslantn2/lessorequalslant/floorleftBigN2−1
+2/floorrightBig
+x(2n1,2N2−2n2−1), 0/lessorequalslantn1/lessorequalslant/floorleftBigN1−1
+2/floorrightBig
+,/floorleftBigN2+1
+2/floorrightBig
+/lessorequalslantn2/lessorequalslantN2−1
+x(2N1−2n1−1,2N2−2n2−1),/floorleftBigN1+1
+2/floorrightBig
+/lessorequalslantn1/lessorequalslantN1−1,/floorleftBigN2+1
+2/floorrightBig
+/lessorequalslantn2/lessorequalslantN2−1;(10)
+3: x/prime/prime=2D_RFFT (x/prime); ⊿2D real FFT kernel
+4: return y=2d_dct_postprocess (x/prime/prime)using Equation (11),
+y(n1,n2)=2/Rfractur/parenleftbigg
+e−jπn2
+2N2/parenleftbigg
+e−jπn1
+2N1x/prime/prime(n1,n2)+ejπn1
+2N1x/prime/prime(N1−n1,n2)/parenrightbigg/parenrightbigg
+where x/prime/prime(N1,n2)=x/prime/prime(n1,N2)=0∀n1,n2; (11)
+5:end function
+6:function 2D_IDCT( x)
+7: x/prime=2d_idct_preprocess (x)using Equation (12)
+x/prime(n1,n2)=e−jπn1
+2N1e−jπn2
+2N2(x(n1,n2)−x(N1−n1,N2−n2)−j(x(N1−n1,n2)+x(n1,N2−n2))),
+where x(N1,n2)=x(n1,N2)=0∀n1,n2; (12)
+8: x/prime/prime=2D_IRFFT (x/prime); ⊿2D real inverse FFT kernel
+9: return y=2d_idct_postprocess (x/prime/prime)=2d_dct_preprocess−1(x/prime/prime)using Equation (13)
+y(n1,n2)=⎧
+⎪⎪⎪⎪⎪⎨
+⎪⎪⎪⎪⎪⎩x
+/prime/prime/parenleftbign1
+2,n2
+2/parenrightbig
+, n1is even ,n2iseven
+x/prime/prime/parenleftBig
+N1−n1+1
+2,n2
+2/parenrightBig
+, n1is odd ,n2is even
+x/prime/prime/parenleftBign1
+2,N2−n2+1
+2/parenrightBig
+, n1is even ,n2is odd
+x/prime/prime/parenleftBig
+N1−n1+1
+2,N2−n2+1
+2/parenrightBig
+,n1is odd ,n2is odd ;(13)
+10:end function
+11:function IDCT_IDXST( x)
+12: x/prime=idct_idxst_preprocess (x)using Equation (14)
+x/prime(n1,n2)=/braceleftbigg
+x(n1,N2−n2),n2/negationslash=0,
+0, n2=0;(14)
+13: x/prime/prime=2D_IDCT (x/prime);
+14: return y=idct_idxst_postprocess (x/prime/prime)using Equation (15)
+y(n1,n2)=(−1)n2x/prime/prime(n1,n2); (15)
+15:end function
+16:function IDXST_IDCT( x)
+17: x/prime=idxst_idct_preprocess (x)using Equation (16)
+x/prime(n1,n2)=/braceleftbigg
+x(N1−n1,n2),n1/negationslash=0,
+0, n1=0;(16)
+18: x/prime/prime=2D_IDCT (x/prime)
+19: return y=idxst_idct_postprocess (x/prime/prime)using Equation (17)
+y(n1,n2)=(−1)n1x/prime/prime(n1,n2); (17)
+20:end function
+G. Other Possible Extensions
+The framework is general and can be extended to con-
+sider various advanced design objectives and constraints, e.g.,
+timing and fence regions. Timing can be considered by net
+weighting or additional differentiable timing costs in the
+objective [29], [37]. Fence regions can be implemented byintroducing multiple electric ﬁelds, e.g., one for each region,
+to enable independent spreading between regions.IV . E
+XPERIMENTAL RESULTS
+The framework was developed in Python with PyTorch
+for optimizers and API, and C ++/CUDA for low-level OPs.
+The CPU parallelism was implemented with OpenMP for
+wirelength and density OPs. Both the DREAMPlace and
+the RePlAce [8] programs run on a Linux server with40-core Intel E5-2698 v4 @ 2.20 GHz and 1 NVIDIA
+Tesla V100 GPU based on V olta architecture. ISPD 2005
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+756 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 40, NO. 4, APRIL 2021
+Fig. 7. GP runtime comparison for ISPD2005 and industrial benchmarks between various implementations and precisions. The runtime of design6 for
+RePlAce for different number of threads is estimated with the method mentioned in ﬁrst paragraph of Section IV-A.
+Fig. 8. Average GPU runtime ratio for ISPD2005 and industrial benchmarks
+with different number of CPU threads. Normalized by the runtime of the
+TCAD version of DREAMPlace on V100 with float64 , which is consistent
+with the ratios in Tables II and III. The normalized ratios for 40 threads andGPUs are annotated for easier comparison.
+(a) (b)
+Fig. 9. Runtime breakdown in percentages of DREAMPlace with float32
+on V100 (a) for bigblue4 and (b) one forward and backward pass in GP.
+contest benchmarks [38] and large industrial designs were
+adopted. We conducted experiments with both double-
+precision (float64 ) and single-precision ( float32 ) ﬂoat-
+ing point numbers on CPU and GPU. We use the same
+dimensions of bins as RePlAce.
+A. Placement Acceleration
+Tables II and III show the HPWL and runtime details
+on ISPD 2005 and industrial benchmarks. With almost the
+same solution quality (within 0.3% difference on average),
+DREAMPlace running on GPU is able to achieve 38 ×and
+47×speedup in GP on the two benchmark suites com-
+pared to RePlAce with 40 threads. DREAMPlace running on(a)
+(b)
+(c)
+Fig. 10. Wirelength forward and backward with float32 . (a) GPU runtime
+comparison of different implementations. (b) CPU runtime comparison ofdifferent implementations with 40 threads. (c) CPU runtime comparison ofthe net-by-net strategy between single thread and 40 threads.
+CPU is also 2 ×faster than RePlAce with 40 threads in GP.
+RePlAce [8] crashed on the 10-million-cell industrial bench-
+mark at the 6th iteration for Nesterov’s optimization. The
+potential reason is that the peak memory usage of RePlAceexceeded the maximum memory (64 GB). Before crashing,
+it took 3396 s for initial placement and on average 7.5 s for
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+LIN et al. : DREAMPlace: DEEP LEARNING TOOLKIT-ENABLED GPU ACCELERATION FOR MODERN VLSI PLACEMENT 757
+TABLE II
+EXPERIMENTAL RESULTS ON ISPD 2005 B ENCHMARKS [38] W ITHFLOAT64
+TABLE III
+EXPERIMENTAL RESULTS ON INDUSTRIAL BENCHMARKS WITHFLOAT64
+(a) (b)
+Fig. 11. GPU runtime comparison of (a) DCT and (b) IDCT algorithms withfloat32 .
+each Nesterov iteration. As this benchmark takes 1000 iter-
+ations with DREAMPlace, we made a runtime estimation of3396+1000×7.5≈10896 s. Meanwhile, among all RePlAce
+runs, initial placement takes 25%–30% of the entire GP time,
+and solving the nonlinear placement takes around 70% ∼75%.
+The LG of DREAMPlace is also around 10 ×faster than the
+NTUplace3 legalizer in the RePlAce ﬂow. As NTUplace3 does
+the DP for both placers, so the runtime is similar. The speedupfor the entire placement ﬂow on GPU is 4 .6×, and that on CPU
+is 2.7×.
+Fig. 7 plots the GP runtime comparison between
+multithreaded DREAMPlace and RePlAce with different pre-
+cisions and implementations. It can be seen that the parallel
+CPU version of DREAMPlace is consistently faster thanRePlAce. Meanwhile, this TCAD extension further improves
+the efﬁciency of the GPU implementations from the DAC
+version [30] except for the smallest benchmark adaptec1 .
+Fig. 8 plots the average runtime ratio for different cases. By
+switching from float64 tofloat32 , an average speedup
+of 1.4×on CPU and 1 .3×on GPU can be achieved, while
+the quality stays almost the same. Compared with the previous
+DAC version [30], this extension achieves 1 .3×speedup with
+float64 and 1.8×speedup with float32 .F r o mF i g .8 ,
+we also observe that the speedup of CPU implementations(a)
+(b)
+Fig. 12. Density forward and backward comparison. (a) GPU runtime com-
+parison between DAC [30] and this extension. (b) CPU runtime comparison
+between single thread and 40 threads with float32 .
+saturates quickly from single thread to 40 threads. This
+observation holds for both RePlAce and DREAMPlace. For
+RePlAce, the best number of threads is 40 with a speedup
+of 3.2×, while for DREAMPlace, 20 threads provide the best
+efﬁciency with a factor of 5 .0×.
+Fig. 9 draws the runtime breakdown of DREAMPlace on
+a 2-million-cell design bigblue4 , where GP and LG only
+take 6.2% runtime of the entire ﬂow. The runtime of GP andLG is even less than that of ﬁle IO for benchmark reading
+and writing. The majority of the runtime (82%) is taken by
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+758 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 40, NO. 4, APRIL 2021
+DP, which still relies on the external placer currently. Previous
+studies [39], [40] have demonstrated more than 6 ×speedup
+from GPU acceleration for DP over multithreaded CPU. While
+DP is not the focus of this article, there is a potential of 18 ×
+speedup for the entire placement by future incorporation ofGPU-accelerated DP, e.g., (2400/25+9+332/6+45)∼18
+forbigblue4 according to Table II. On the other hand,
+within each forward and backward pass of GP, the density-related computation takes longer than wirelength (73.4%
+versus 26.5%). With efﬁcient DCT/IDCT implementation, the
+electric ﬁeld computation is no longer the bottleneck fordensity forward and backward.
+B. Acceleration of Low-Level Operators
+We further investigate the efﬁciency of the low-level OPs,
+e.g., wirelength forward and backward, DCT/IDCT, and den-sity forward and backward. Fig. 10 compares three approaches
+discussed in Section III-A. “Net-by-Net” denotes the net-level
+parallelization; “Atomic” denotes the pin-level paralleliza-tion with atomic operations in Algorithm 1 [30]; “Merged”
+denotes the combined forward and backward implementation
+in Algorithm 2. When using float32 on GPU, the merged
+approach achieves 3 .7×speedup over the net-by-net one and
+1.8×speedup over the atomic one. On CPU, the atomic strat-
+egy is 20% slower than the net-by-net strategy with 40 threads,
+while the merged strategy is over 30% faster. Meanwhile, a
+promising speedup factor of 7 .5×from a single thread to 40
+threads can be achieved with the net-by-net strategy.
+Fig. 11 compares the 2-D DCT/IDCT implementation using
+2N-point FFT (“DCT-2N” and “IDCT-2N”), N-point FFT
+(“DCT-N” and “IDCT-N”), and N-point 2-D FFT (“DCT-2D-
+N” and “IDCT-2D-N”) [32]. Considering the map sizes in the
+experiment (from 512 ×512 to 4096 ×4096) with float32 ,
+theN-point DCT implementation is 2 .1×faster [30] and
+theN-point 2-D implementation can be 5 .0×faster. For
+IDCT, the N-point implementation achieves 1 .3×speedup and
+the 2-D implementation achieves 4 .1×speedup. This result
+demonstrates the efﬁciency of Algorithm 4.
+As DCT/IDCT is used in the density OP, in Fig. 12, the
+efﬁciency of the entire density forward and backward proce-dure is compared for GPU and CPU implementations. With allthe speedup techniques, an average of 1.5 ×− 2.1×speedup
+on GPU can be achieved with the current implementation over
+the preliminary DAC version [30]. For the parallel CPU imple-mentation, 3 .1×runtime reduction can be achieved with 40
+threads.
+C. Comparison With Solvers in
+PyTorch
+As mentioned, DREAMPlace can enable easy adoption of
+native solvers in PyTorch . Here, we compare with the widely
+used solvers implemented in the toolkit, like Adam [25] and
+stochastic gradient descent (SGD) with momentum, as shownin Table IV. As these solvers do not have line search, we
+add simple learning rate decay in each iteration to control the
+step size of gradient descent with the decay factor shown inthe “LR Decay” columns. We use the default conﬁgurations
+for these solvers and report the ﬁnal HPWL after DP andTABLE IV
+COMPARISON WITHNATIVEPYTORCH SOLVERS LIKEADAM [25] AND
+SGD W ITHMOMENTUM WITHFLOAT64ONGPU
+the runtime for GP in seconds. In our experiments, we ﬁnd
+the gradient descent process may be unable to converge if thelearning rate is not properly designed. Therefore, we customize
+the decay factor for each design. It can be seen that Adam
+can achieve slightly better results than the Nesterov’s acceler-ated gradient decent method (shortened to Nesterov’s method
+for brevity) implemented in RePlAce, while the Nesterov’s
+method converges much faster. Meanwhile, the results for SGDwith momentum are about 1.2% worse. As the solvers have
+many parameters to tune, it is hard to simply conclude that
+Adam or SGD with momentum is deﬁnitely worse than theNesterov’s method with the experiments, but the preliminary
+results are at least promising enough to worth further explo-
+ration. With the DREAMPlace framework, we can investigate
+new solvers easily by scripting in PyTorch .
+D. Routability-Driven Placement
+To verify the runtime beneﬁts in routability-driven place-
+ment, we conducted experiments on the DAC 2012 contest
+benchmarks [41]. We consider two major metrics for solu-tion quality: 1) “sHPWL” as scaled wirelength and 2) “RC”
+as routing congestion. In the contest, the RC is deﬁned as a
+weighted average of overﬂows in the top 0.5%, 1%, 2%, 5%congested tiles. The minimum value for RC is 100, indicat-
+ing no overﬂow. The sHPWL is computed using the following
+equation [41]:
+sHPWL =HPWL ×(1+0.03×(RC−100)) (20)
+indicating that unit increase in routing congestion is counted
+as 3% HPWL overhead.
+In this experiment, we obtained the RePlAce binary from
+Cheng et al. [8] to keep consistent experimental settings.
+Table V shows the solution quality and runtime. As NCTUgr
+is repeatedly invoked as an external congestion estimator and
+it only runs on CPU with single-thread, we separate the run-time of GP into two parts: 1) nonlinear optimization (“NL”)
+and 2) global routing (“GR”). NTUplace3 [4] is adopted as
+the LG and DP for RePlAce, and DP for DREAMPlace. We
+can see that DREAMPlace with GPU acceleration can pro-
+vide very similar solution quality, while 20 ×faster in NL and
+9×faster in GP including the runtime of the global router.
+For the entire placement ﬂow, we can achieve 5 ×speedup.
+DREAMPlace also shows compelling efﬁciency and qualitywith 40 threads on CPU. We also observe that DREAMPlace
+invokes the global router less often than RePlAce, leading
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+LIN et al. : DREAMPlace: DEEP LEARNING TOOLKIT-ENABLED GPU ACCELERATION FOR MODERN VLSI PLACEMENT 759
+TABLE V
+EXPERIMENTAL RESULTS ON DAC 2012 B ENCHMARKS [41] FOR ROUTABILITY -DRIVEN PLACEMENT
+to shorter GR time. Meanwhile, for DREAMPlace, GR takes
+around 70% of the GP time, which is the runtime bottleneck.
+V. C ONCLUSION
+In this article, we take a new perspective on solving
+classical analytical placement by casting it into a neuralnetwork training problem. Leveraging the deep learning toolkit
+PyTorch , we develop a new open-source placement engine,
+DREAMPlace with GPU acceleration. It achieves around 40 ×
+speedup in GP without quality degradation for academic
+and industrial benchmarks, compared to the state-of-the-art
+RePlAce running on many threads. We explore differentimplementations of low-level OPs for forward and backward
+propagation to boost the overall efﬁciency.
+Furthermore, DREAMPlace is highly extensible to incor-
+porate new algorithms/solvers and new objectives by simply
+writing high-level programming languages such as Python .
+We plan to further investigate cell inﬂation for routability
+and net weighting for timing optimization [29], [35], [37]
+as well as GPU-accelerated DP. It can also be extended toleverage multi-GPU platforms for further speedup. Meanwhile,
+we plan to investigate the efﬁciency of implementations using
+ﬁxed-point numbers to guarantee run-to-run determinism. AsDREAMPlace decouples the high-level algorithmic design and
+low-level acceleration efforts, we believe this work shall open
+up new directions for revisiting classical EDA problems.
+A
+CKNOWLEDGMENT
+The authors would like to thank Lutong Wang and Ilgweon
+Kang from the University of California at San Diego forpreparing the RePlAce binary, suggestions on the experimental
+setups, and verifying the results.
+R
+EFERENCES
+[1] A. B. Kahng, S. Reda, and Q. Wang, “Architecture and details of a
+high quality, large-scale analytical placer,” in Proc. IEEE/ACM Int. Conf.
+Comput.-Aided Design (ICCAD) , 2005, pp. 891–898.
+[2] T. Chan, J. Cong, and K. Sze, “Multilevel generalized force-directed
+method for circuit placement,” in Proc. ACM Int. Symp. Phys. Design
+(ISPD) , 2005, pp. 185–192.
+[3] A. B. Kahng and Q. Wang, “A faster implementation of APlace,” in
+Proc. ACM Int. Symp. Phys. Design (ISPD) , 2006, pp. 218–220.
+[4] T.-C. Chen, Z.-W. Jiang, T.-C. Hsu, H.-C. Chen, and Y .-W.
+Chang, “NTUPlace3: An analytical placer for large-scale mixed-size designs with preplaced blocks and density constraints,” IEEE
+Trans. Comput.-Aided Design Integr. Circuits Syst. , vol. 27, no. 7,
+pp. 1228–1240, Jul. 2008.[5] M.-K. Hsu et al. , “NTUplace4h: A novel routability-driven place-
+ment algorithm for hierarchical mixed-size circuit designs,” IEEE
+Trans. Comput.-Aided Design Integr. Circuits Syst. , vol. 33, no. 12,
+pp. 1914–1927, Dec. 2014.
+[6] J. Lu et al. , “ePlace: Electrostatics-based placement using fast Fourier
+transform and Nesterov’s method,” ACM Trans. Design Autom. Electron.
+Syst., vol. 20, no. 2, p. 17, 2015.
+[7] J. Lu et al. , “ePlace-MS: Electrostatics-based placement for mixed-
+size circuits,” IEEE Trans. Comput.-Aided Design Integr. Circuits Syst. ,
+vol. 34, no. 5, pp. 685–698, May 2015.
+[8] C. Cheng, A. B. Kahng, I. Kang, and L. Wang, “RePlAce: Advancing
+solution quality and routability validation in global placement,” IEEE
+Trans. Comput.-Aided Design Integr. Circuits Syst. , vol. 38, no. 9,
+pp. 1717–1730, Sep. 2019.
+[9] Z. Zhu, J. Chen, Z. Peng, W. Zhu, and Y .-W. Chang, “Generalized aug-
+mented Lagrangian and its applications to VLSI global placement,” in
+Proc. ACM/IEEE Design Autom. Conf. (DAC) , 2018, pp. 1–6.
+[10] N. Viswanathan, M. Pan, and C. Chu, “FastPlace 3.0: A fast multilevel
+quadratic placement algorithm with placement congestion control,” in
+Proc. IEEE/ACM Asia South Pac. Design Autom. Conf. (ASPDAC) , 2007,
+pp. 135–140.
+[11] X. He, T. Huang, L. Xiao, H. Tian, and E. F. Y . Young, “Ripple: A robust
+and effective routability-driven placer,” IEEE Trans. Comput.-Aided
+Design Integr. Circuits Syst. , vol. 32, no. 10, pp. 1546–1556, Oct. 2013.
+[12] T. Lin, C. Chu, J. R. Shinnerl, I. Bustany, and I. Nedelchev, “POLAR:
+Placement based on novel rough legalization and reﬁnement,” in
+Proc. IEEE/ACM Int. Conf. Comput.-Aided Design (ICCAD) , 2013,
+pp. 357–362.
+[13] T. Lin, C. Chu, J. R. Shinnerl, I. Bustany, and I. Nedelchev, “POLAR:
+A high performance mixed-size Wirelengh-driven placer with density
+constraints,” IEEE Trans. Comput.-Aided Design Integr. Circuits Syst. ,
+vol. 34, no. 3, pp. 447–459, Mar. 2015.
+[14] M.-C. Kim, D.-J. Lee, and I. L. Markov, “SimPL: An effective placement
+algorithm,” IEEE Trans. Comput.-Aided Design Integr. Circuits Syst. ,
+vol. 31, no. 1, pp. 50–60, Jan. 2012.
+[15] M.-C. Kim, N. Viswanathan, C. J. Alpert, I. L. Markov, and S. Ramji,
+“MAPLE: multilevel adaptive placement for mixed-size designs,” inProc. ACM Int. Symp. Phys. Design (ISPD) , 2012, pp. 193–200.
+[16] T. Lin, C. Chu, and G. Wu, “POLAR 3.0: An ultrafast global placement
+engine,” in Proc. IEEE/ACM Int. Conf. Comput.-Aided Design (ICCAD) ,
+2015, pp. 520–527.
+[17] W. Li, Y . Lin, and D. Z. Pan, “elfPlace: Electrostatics-based placement
+for large-scale heterogeneous FPGAs,” in Proc. IEEE/ACM Int. Conf.
+Comput.-Aided Design (ICCAD) , Nov. 2019, pp. 1–8.
+[18] Cadence Innovus . Accessed: Jun. 1, 2020. [Online]. Available:
+http://www.cadence.com
+[19] Synopsys IC Compiler . Accessed: Jun. 1, 2020. [Online]. Available:
+http://www.synopsys.com
+[20] A. Ludwin, V . Betz, and K. Padalia, “High-quality, deterministic parallel
+placement for FPGAs on commodity hardware,” in
+Proc. ACM Symp.
+FPGAs , 2008, pp. 14–23.
+[21] W. Li, M. Li, J. Wang, and D. Z. Pan, “UTPlaceF 3.0: A parallelization
+framework for modern FPGA global placement,” in Proc. IEEE/ACM
+Int. Conf. Comput.-Aided Design (ICCAD) , 2017, pp. 922–928.
+[22] J. Cong and Y . Zou, “Parallel multi-level analytical global placement on
+graphics processing units,” in Proc. IEEE/ACM Int. Conf. Comput.-Aided
+Design (ICCAD) , 2009, pp. 681–688.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+760 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 40, NO. 4, APRIL 2021
+[23] C.-X. Lin and M. D. Wong, “Accelerate analytical placement with GPU:
+A generic approach,” in Proc. IEEE/ACM Design Autom. Test Europe
+(DATE) , 2018, pp. 1345–1350.
+[24] A. Paszke et al. , “PyTorch: An imperative style, high-performance deep
+learning library,” in Proc. Conf. Neural Inf. Process. Syst. (NeurIPS) ,
+2019, pp. 8024–8035.
+[25] D. P. Kingma and J. Ba, “Adam: A method for stochastic optimization,”
+inProc. Int. Conf. Learn. Represent. (ICLR) , 2015, pp. 1–6.
+[26] I. Goodfellow, Y . Bengio, A. Courville, and Y . Bengio, Deep learning ,
+vol. 1. Cambridge, MA, USA: MIT Press, 2016.
+[27] M.-K. Hsu, Y .-W. Chang, and V . Balabanov, “TSV-aware analytical
+placement for 3D IC designs,” in Proc. ACM/IEEE Design Autom. Conf.
+(DAC) , 2011, pp. 664–669.
+[28] M.-K. Hsu, V . Balabanov, and Y .-W. Chang, “TSV-aware analytical
+placement for 3-D IC designs based on a novel weighted-average wire-length model,” in Proc. ACM/IEEE Design Autom. Conf. (DAC) , vol. 32,
+2013, pp. 497–509.
+[29] W. C. Naylor, R. Donelly, and L. Sha, “Non-linear optimization system
+and method for wire length and delay optimization for an automaticelectric circuit placer,” U.S. Patent 6 301 693, Oct. 2001.
+[30] Y . Lin, S. Dhar, W. Li, H. Ren, B. Khailany, and D. Z. Pan,
+“DREAMPlace: Deep learning toolkit-enabled text GPU accelerationfor modern VLSI placement,” in Proc. ACM/IEEE Design Autom. Conf.
+(DAC) , 2019, pp. 1–6.
+[31] K. A. Berman and J. Paul, Fundamentals of Sequential and Parallel
+Algorithms , 1st ed. Boston, MA, USA: PWS, 1996.
+[32] J. Makhoul, “A fast cosine transform in one and two dimensions,” IEEE
+Trans. Signal Process. , vol. SP-28, no. 1, pp. 27–34, Feb. 1980.
+[33] F. Zou, L. Shen, Z. Jie, W. Zhang, and W. Liu, “A sufﬁcient condition
+for convergences of Adam and RMSProp,” in Proc. IEEE Conf. Comput.
+Vis. Pattern Recognit. (CVPR) , 2019, pp. 11127–11135.
+[34] P. Spindler, U. Schlichtmann, and F. M. Johannes, “Abacus: Fast legal-
+ization of standard cell circuits with minimal movement,” in Proc. ACM
+Int. Symp. Phys. Design (ISPD) , 2008, pp. 47–53.
+[35] T. F. Chan, K. Sze, J. R. Shinnerl, and M. Xie, “mPL6: Enhanced
+multilevel mixed-size placement with congestion control,” in Modern
+Circuit Placement , G. J. Nam, and J. Cong, Eds. Boston, MA, USA:
+Springer, 2007, pp. 247–288, doi: 10.1007/978-0-387-68739-1_10 .
+[36] W.-H. Liu, W.-C. Kao, Y .-L. Li, and K.-Y . Chao, “NCTU-GR 2.0:
+multithreaded collision-aware global routing with bounded-length maze
+routing,” IEEE Trans. Comput.-Aided Design Integr. Circuits Syst. ,
+vol. 32, no. 5, pp. 709–722, Mar. 2013.
+[37] A. B. Kahng and Q. Wang, “An analytic placer for mixed-size placement
+and timing-driven placement,” in Proc. IEEE/ACM Int. Conf. Comput.-
+Aided Design (ICCAD) , 2004, pp. 565–572.
+[38] G.-J. Nam, C. J. Alpert, P. Villarrubia, B. Winter, and M. Yildiz, “The
+ISPD2005 placement contest and benchmark suite,” in Proc. ACM Int.
+Symp. Phys. Design (ISPD) , 2005, pp. 216–220.
+[39] S. Dhar and D. Z. Pan, “GDP: GPU accelerated detailed placement,”
+inProc. IEEE High Perform. Extreme Comput. Conf. (HPEC) , 2018,
+pp. 1–7.
+[40] Y . Lin, W. Li, J. Gu, H. Ren, B. Khailany, and D. Z. Pan,
+“ABCDPlace: Accelerated batch-based concurrent detailed place-ment on multi-threaded CPUs and GPUs,” IEEE Trans. Comput.-
+Aided Design Integr. Circuits Syst. , early access, Feb. 4, 2020,
+doi: 10.1109/TCAD.2020.2971531 .
+[41] N. Viswanathan, C. Alpert, C. Sze, Z. Li, and Y . Wei, “The DAC
+2012 routability-driven placement contest and benchmark suite,” in Proc.
+ACM/IEEE Design Autom. Conf. (DAC) , 2012, pp. 774–782.
+Yibo Lin (Member, IEEE) received the B.S. degree
+in microelectronics from Shanghai Jiao TongUniversity, Shanghai, China, in 2013, and thePh.D. degree from the Electrical and Computer
+Engineering Department, University of Texas at
+Austin, Austin, TX, USA, in 2018.
+He is currently an Assistant Professor with the
+Computer Science Department, Center for Energy-
+Efﬁcient Computing and Applications, PekingUniversity, Beijing, China. His research interestsinclude physical design, machine learning applica-
+tions, GPU acceleration, and hardware security.
+Dr. Lin has received four Best Paper Awards at premier venues (ISPD 2020,
+DAC 2019, VLSI Integration 2018, and SPIE 2016). He has also served inthe Technical Program Committees of many major conferences, including
+ICCAD, ICCD, ISPD, and DAC.
+Zixuan Jiang (Graduate Student Member, IEEE)
+received the B.E. degree in electronic informationengineering from Zhejiang University, Hangzhou,China, in 2018. He is currently pursuing the
+Ph.D. degree with the Department of Electrical
+and Computer Engineering, University of Texas atAustin, Austin, TX, USA.
+His current research interests involve machine
+learning frameworks and applications, and physical
+design algorithms and implementations.
+Jiaqi Gu (Graduate Student Member, IEEE)
+received the B.E. degree in microelectronic science
+and engineering from Fudan University, Shanghai,China, in 2018. He is currently pursuing thePh.D. degree with the Department of Electrical
+and Computer Engineering, University of Texas at
+Austin, Austin, TX, USA, under the supervision ofP r o f .D .Z .P a n .
+His current research interests include machine
+learning, algorithm and architecture design, opticalneuromorphic computing for AI acceleration, and
+GPU acceleration for VLSI physical design automation.
+Dr. Gu has received the Best Paper Reward at ASP-DAC 2020.
+Wuxi Li (Member, IEEE) received the B.S.
+degree in microelectronics from Shanghai Jiao Tong
+University, Shanghai, China, in 2013, and the M.S.
+and Ph.D. degrees in computer engineering from theUniversity of Texas at Austin, Austin, TX, USA, in2015 and 2019, respectively.
+He is currently a Staff Software Engineer with the
+Vivado Implementation Team, Xilinx, San Jose, CA,USA, where he is primarily working on the physicalsynthesis ﬁeld.
+Dr. Li has received the Best Paper Award at DAC
+2019, the Silver Medal in ACM Student Research Contest at ICCAD 2018,and the ﬁrst-place awards in the FPGA placement contests of ISPD 2016and 2017.
+Shounak Dhar (Member, IEEE) received the
+B.Tech. degree in electrical engineering from theIndian Institute of Technology Bombay, Mumbai,
+India, in 2014, and the Ph.D. degree in electrical and
+computer engineering from the University of Texasat Austin, Austin, TX, USA, in 2019.
+He is currently working with Intel Corporation,
+Santa Clara, CA, USA, on EDA algorithms in Intel’sFPGA design implementation tool. His researchinterests include electronic design automation and
+hardware acceleration.
+Haoxing Ren (Senior Member, IEEE) received the
+B.S./M.S. degrees in electrical engineering fromShanghai Jiao Tong University, Shanghai, China,the M.S. degree in computer engineering from
+Rensselaer Polytechnic Institute, Troy, NY , USA,
+and the Ph.D. degree in computer engineering fromthe University of Texas at Austin, Austin, TX, USA.
+From 2000 to 2006, he was a Software Engineer
+with IBM Microelectronics, Armonk, NY , USA.
+From 2007 to 2015, he was a Research Staff Memberwith IBM T. J. Watson Research Center, Ossining,
+NY , USA. From 2015 to 2016, he was a Technical Executive with Suzhou
+PowerCore Technology, Austin. He is currently a Principal Research Scientistwith NVIDIA, Austin. He holds over 20 patents and coauthored more than 40papers including several book chapters in physical design and logic synthesis.
+His research interests are machine learning applications in design automation
+and GPU accelerated EDA.
+Dr. Ren received many IBM technical achievement rewards including the
+IBM Corporate Award for his work on improving microprocessor design
+productivity. He has received the Best Paper Awards at ISPD’13 and DAC’19.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 
+LIN et al. : DREAMPlace: DEEP LEARNING TOOLKIT-ENABLED GPU ACCELERATION FOR MODERN VLSI PLACEMENT 761
+Brucek Khailany (Senior Member, IEEE) received
+the B.S.E. degree in electrical engineering from theUniversity of Michigan at Ann Arbor, Ann Arbor,MI, USA, in 1997, and the Ph.D. degree from
+Stanford University, Stanford, CA, USA, in 2003.
+In 2009, he joined NVIDIA, where he is cur-
+rently the Director of the ASIC and VLSI Researchgroup. He leads research into innovative design
+methodologies for integrated circuit development,
+machine learning (ML) and GPU-assisted electronicdesign automation algorithms, and energy-efﬁcient
+ML accelerators. From 2004 to 2009, he was a Co-Founder and the Principal
+Architect with Stream Processors, Inc., Sunnyvale, CA, USA, where he ledresearch and development activities related to parallel processor architectures.Over 10 years at NVIDIA, he has contributed to many projects in research
+and product groups spanning computer architecture and VLSI design.
+D a v i dZ .P a n (Fellow, IEEE) received the B.S.
+degree from Peking University, Beijing, China, andthe M.S. and Ph.D. degrees from the University ofCalifornia at Los Angeles, Los Angeles, CA, USA.
+From 2000 to 2003, he was a Research Staff
+Member with IBM T. J. Watson Research Center,Ossining, NY , USA. He is currently an EngineeringFoundation Professor with the Department of
+Electrical and Computer Engineering, University of
+Texas at Austin, Austin, TX, USA. He has publishedover 375 journal articles and refereed conference
+papers, and is the holder of 8 U.S. patents. His research interests include
+cross-layer nanometer IC design for manufacturability, reliability, security,machine learning, and hardware acceleration, design/CAD for analog/mixedsignal designs, and emerging technologies.
+Dr. Pan has received a number of prestigious awards for his research contri-
+butions, including the SRC Technical Excellence Award in 2013, DAC Top 10Author in Fifth Decade, DAC Proliﬁc Author Award, ASP-DAC FrequentlyCited Author Award, 19 Best Paper Awards at premier venues (ISPD 2020,
+ASPDAC 2020, DAC 2019, GLSVLSI 2018, VLSI Integration 2018, HOST
+2017, SPIE 2016, ISPD 2014, ICCAD 2013, ASPDAC 2012, ISPD 2011,IBM Research 2010 Pat Goldberg Memorial Best Paper Award, ASPDAC2010, DATE 2009, ICICDT 2009, SRC Techcon in 1998, 2007, 2012, and
+2015) and 15 additional Best Paper Award ﬁnalists, Communications of the
+ACM Research Highlights in 2014, UT Austin RAISE Faculty ExcellenceAward in 2014, the Cadence Academic Collaboration Award in 2019, andmany international CAD contest awards, among others. He has served as a
+Senior Associate Editor for the ACM Transactions on Design Automation
+of Electronic Systems , an Associate Editor for the IEEE T
+RANSACTIONS
+ONCOMPUTER -AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS ,
+the IEEE T RANSACTIONS ON VERY LARGE SCALE INTEGRATION (VLSI)
+SYSTEMS , the IEEE T RANSACTIONS ON CIRCUITS AND SYSTEMS —
+PART I: R EGULAR PAPERS , the IEEE T RANSACTIONS ON CIRCUITS
+AND SYSTEMS —P ART II: E XPRESS BRIEFS , IEEE D ESIGN &T EST,
+Science China Information Sciences ,a n d Journal of Computer Science
+and Technology , and IEEE CAS Society Newsletter. He has served in the
+Executive and Program Committees of many major conferences, includingDAC, ICCAD, ASPDAC, and ISPD. He is the ASPDAC 2017 Program Chair,
+the ICCAD 2019 General Chair, the DAC 2014 Tutorial Chair, and the ISPD
+2008 General Chair. He is a Fellow of SPIE.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 27,2025 at 08:15:58 UTC from IEEE Xplore.  Restrictions apply. 

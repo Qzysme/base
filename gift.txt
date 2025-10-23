@@ -1,0 +1,1131 @@
+3924 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 44, NO. 10, OCTOBER 2025
+An Efﬁcient Placement Speedup Technique Based
+on Graph Signal Processing
+Yiting Liu , Hai Zhou, Jia Wang ,Senior Member, IEEE ,F a nY a n g ,Member, IEEE ,
+Xuan Zeng ,Senior Member, IEEE , and Li Shang ,Member, IEEE
+Abstract —Placement is a critical task with high computation
+complexity in VLSI physical design. Modern analytical placersformulate the placement objective as a nonlinear optimization
+task, which suffers a long iteration time. To accelerate and
+enhance the placement process, recent studies have turned todeep learning-based approaches, particularly leveraging graphconvolution networks (GCNs). However, learning-based plac-ers require time- and data-consuming model training due tothe complexity of circuit placement that involves large-scalecells and design-speciﬁc graph statistics. This article proposesGiFt, a parameter-free initialization technique for acceleratingplacement, rooted in graph signal processing. GiFt excels atcapturing multiresolution smooth signals of circuit graphs togenerate optimized initial placement solutions without the needfor time-consuming model training, and meanwhile signiﬁcantlyreduces the number of iterations required by analytical placers.Moreover, we present GiFtPlus, an enhanced version of GiFt,which is more efﬁcient in handling large-scale circuit placementand can accommodate location constraints. Experimental resultson public benchmarks show that GiFt and GiFtPlus signiﬁcantlyimprove placement efﬁciency, while achieving competitive orsuperior performance compared to state-of-the-art placers. Inparticular, the recently proposed GPU-accelerated analyticalplacer DREAMPlace uses up to 50% more total runtime thanGiFtPlus-DREAMPlace.
+Index Terms —Graph convolution, graph ﬁlter, graph sig-
+nal processing (GSP), physical design, placement initialization,placement.
+I. I NTRODUCTION
+PLACEMENT is a critical and complex task in VLSI
+physical designs. It determines the locations of connected
+cells to minimize total wirelength while adhering to con-straints (e.g., density constraints). Despite continuous efforts to
+Received 19 September 2024; revised 8 December 2024 and 18 February
+2025; accepted 23 March 2025. Date of publication 1 April 2025; dateof current version 22 September 2025. This work was supported in partby the National Key Research and Development Program of China under
+Grant 2023YFB4405101, and in part by the National Natural Science
+Foundation of China under Grant 62090025 and Grant 92373207. This articlewas recommended by Associate Editor B. Yu. (Corresponding author: Li
+Shang.)
+Yiting Liu and Li Shang are with the School of Computer Science, Fudan
+University, Shanghai 200433, China (e-mail: yitingliu20@fudan.edu.cn;lishang@fudan.edu.cn).
+Hai Zhou is with the Department of ECE, Northwestern University,
+Evanston, IL 60208 USA (e-mail: haizhou@northwestern.edu).
+Jia Wang is with the Department of ECE, Illinois Institute of Technology,
+Chicago, IL 60616 USA (e-mail: jwang@ece.iit.edu).
+Fan Yang and Xuan Zeng are with the School of Microelectronics,
+Fudan University, Shanghai 200433, China (e-mail: yangfan@fudan.edu.cn;xzeng@fudan.edu.cn).
+Digital Object Identiﬁer 10.1109/TCAD.2025.3556968accelerate and improve the placement process, it remains chal-
+lenging due to the growing complexity of modern designs. Thestate-of-the-art analytical placers [1],[2]model the placement
+problem as an electrostatic system and iteratively optimize
+it, which involves long iteration time. Recently proposedDREAMPlace [3]leverages GPU acceleration to enhance
+efﬁciency. However, long iterations remain a challenge to
+analytical placers.
+To expedite the placement process, deep learning-based
+methods have drawn signiﬁcant attention. Recently proposed
+graph convolution network (GCN)-based methods repre-sent circuit netlist as graph and produce initial chip
+placement through efﬁcient model inference. For instance,
+GraphPlanner [4]utilizes a variational GCN-based model to
+generate initial placement solutions, streamlining the place-
+ment procedure for improved efﬁciency. Researchers [5],[6]
+apply GCNs and their variants to encode the connectivity
+information for generating node embeddings. These embed-
+dings are subsequently employed in reinforcement learningcalculations to yield superior placement results.
+However, existing empirical GCN-based approaches face
+two key limitations. First, these approaches require time-consuming parameter learning with high computation and
+memory costs. Speciﬁcally, GCN-based deep models equipped
+with a large number of learnable parameters demand a signiﬁ-cant amount of training data and considerable training time. As
+the scale of modern designs continues to increase, the compu-
+tational complexity and memory demands of GCN-based deepmodels increase accordingly. Second, it is challenging to guar-
+antee the generalization of GCN-based models. The statistical
+characteristics of graph structures across various designs can
+vary signiﬁcantly, and the existence of predetermined ﬁxed
+cells (e.g., ﬁxed IOs) exacerbates the issue. Consequently, evenwell-trained GCNs may struggle to generalize to other unseen
+designs, limiting their practical applicability. Therefore, an
+interesting question arises: How to minimize the required
+optimization iterations of analytical solvers and yet avoid the
+high training costs of GCN-based methods?
+This article presents GiFt, an efﬁcient parameter-free ini-
+tialization approach for accelerating chip placement. GiFt
+can be seamlessly integrated with modern analytical placers
+to construct an ultrafast placement ﬂow GiFt-Placer, whichsigniﬁcantly reduces the numerous optimization iterations of
+placers without the need for time-consuming model training. In
+essence, GiFt is theoretically rooted in graph signal processing(GSP) and we emphasize the crucial role of smoothness ,a
+1937-4151 c/circlecopyrt2025 IEEE. All rights reserved, including rights for text and data mining, and training of artiﬁcial intelligence
+and similar technologies. Personal use is permitted, but republication/redistribution requires IEEE permission.
+See https://www.ieee.org/publications/rights/index.html for more information.Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+LIU et al.: EFFICIENT PLACEMENT SPEEDUP TECHNIQUE 3925
+key concept in GSP, in enhancing chip placement. Speciﬁcally,
+GiFt functions as a multifrequency Graph Filter with low
+computation complexity to promote both local and global
+signal smoothness on circuit graphs. This feature facilitates
+the generation of optimized initial placement solutions, whichdrives the subsequent placers to generate high-quality place-
+ment results with highly reduced iteration time. Moreover, we
+prove that both the classic eigenvector-based placers [7],[8]
+and recently emerged GCN-based placers [4],[5]are spe-
+cial cases of GiFt-Placer. Our work further points out that
+these approaches introduce redundant computations, whichare unnecessary for high-quality chip placement. Moreover,
+we propose GiFtPlus, an enhanced version designed to more
+efﬁciently address large-scale circuit placement problems with
+location constraints. Experimental results on public bench-
+marks show that GiFt-Placer and GiFtPlus-Placer signiﬁcantlyimprove placement efﬁciency, while achieving competitive or
+superior performance compared to state-of-the-art placers. In
+particular, compared to DREAMPlace, the recently proposedGPU-accelerated analytical placer, GiFtPlus improves runtime
+by over 50%.
+The key contributions are listed as follows.1) We propose a new multifrequency graph ﬁlter-based
+placement initialization approach called GiFt, which
+can comprehensively capture the graph structure andefﬁciently generate optimized cell locations.
+2) GiFt offers high efﬁciency through sparse matrix multi-
+plication and does not require a time-consuming modeltraining process due to its parameter-free nature.
+3) By integrating graph sparsiﬁcation techniques and
+Dirichlet boundary conditions, we introduce GiFtPlus,
+an enhanced version of GiFt that more efﬁciently
+produces optimized cell locations for large-scale chipplacement with location constraints.
+4) GiFt and GiFtPlus can be seamlessly integrated with
+modern analytical placers to construct GiFt-Placerand GiFtPlus-Placer placement ﬂow, which effectively
+reduces the number of iterations required for analytical
+placers and signiﬁcantly improves placement efﬁciency,even surpassing the performance of analytical placers
+running on GPU versions.
+5) By examining classic eigenvector-based placers and
+recent GCN-based placers from the perspective of GSP,
+we prove that they can be considered as special cases of
+GiFt-Placer, but they introduce unnecessary computationcosts to chip placement.
+The remainder of this article is organized as follows.
+Section IIdescribes preliminaries for the rest of this article.
+Section IIIintroduces the details of GiFt. Section IVrevisits
+the eigenvector-based placer and GCN-based placer from GSP
+perspective, demonstrating that they are special case of GiFt.
+Section Vpresents the enhanced version GiFtPlus. Section VI
+presents the experimental results. Section VIIdiscusses the
+theoretical foundations of this work. We conclude the article
+in Section VIII.
+II. P
+RELIMINARIES
+This section introduces the fundamental knowledge of GSP
+and global placement.A. Graph Signal Processing
+Given a weighted undirected graph G=(V,E)with a
+set of nodes Vand edges E, it can be represented as an
+adjacency matrix A={wi,j}∈RN×Nwith wi,j>0 if node vi
+andvjare connected by edges, and wi,j=0 otherwise. The
+graph Laplacian matrix is deﬁned as L=D−A, where D=
+diag(d1,d2,..., dn)∈RN×Nrepresents the degree matrix of A
+with di=/summationtext
+vj∈Vwi,j. The normalized graph Laplacian matrix
+is deﬁned as ˜L=D−(1/2)LD−(1/2).
+The graph signal gis deﬁned as a mapping g:V→R
+and it can be expressed as an n-dimensional vector where
+each element gican encapsulate diverse types of information
+associated with node vi[9]. GSP is a ﬁeld dedicated to the
+analysis and manipulation of these signals on graphs, intending
+to extract meaningful insights or accomplish various tasks.
+Smoothness: Smoothness in GSP refers to the rate at
+which signal values change across the nodes of a graph. A
+smooth signal shows minimal variation, meaning nodes that
+are directly connected exhibit similar signal values. In contrast,a less smooth signal displays signiﬁcant differences between
+connected nodes. Quantitatively, smoothness can be measured
+using the graph Laplacian quadratic form, which provides a
+mathematical basis for evaluating how signal values differ
+across a graph.
+The graph gradient of signal gat node v
+iis deﬁned as
+∇ig:=[{(∂f/∂e)|i}e∈E]=[√wi,j(gi−gj)].The smoothness of
+the graph signal can be quantiﬁed using the graph Laplacianquadratic form, as calculated by the following equation:
+S(g)=1
+2/summationdisplay
+vi∈V||∇ig||2
+2=/summationdisplay
+(vi,vj)∈Ewi,j/parenleftbig
+gj−gi/parenrightbig2. (1)
+Graph Fourier Transform (GFT): The GFT is a typical
+method for transforming a graph signal from the spatial
+domain (where the signal values are associated with the nodesin a graph) to the spectral domain (where the signal is repre-
+sented in terms of its frequency components over the graph).
+This transformation is critical for tasks, such as denoising, asit allows for direct manipulation of the frequency components,
+facilitating more efﬁcient signal processing operations within
+the spectral domain.
+Since the graph Laplacian matrix Lis real and symmetric,
+it can be decomposed into L=U/Lambda1U
+T, where /Lambda1=
+diag(λ1,...,λ n)denotes eigenvalues with λ1≤λ2,...,≤λn
+andU=[u1,..., un] is the corresponding eigenvectors. Using
+eigenvector matrix Uas the GFT basis, we call ˆg=UTg
+as GFT that transforms the graph signal gfrom the spatial
+domain to the spectral domain. And its inverse transform is
+deﬁned as g=Uˆg.
+Graph Filter: A graph ﬁlter is a tool used in GSP to selec-
+tively emphasize or suppress certain frequency components of
+a signal on a graph, similar to how traditional ﬁlters workon time-based signals (like audio). Graph ﬁlters exploit the
+structure of the graph to enhance or reduce speciﬁc patterns
+within the signal, thus optimizing the signal processing tasksaccording to speciﬁc requirements.
+In the spectral domain, the graph ﬁlter can be used to
+selectively ﬁlter some unwanted frequencies present in the
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+3926 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 44, NO. 10, OCTOBER 2025
+graph signal, which is formally deﬁned as:
+H=Udiag(h(λ1),h(λ2) ,..., h(λn))UT(2)
+where h(·)is a ﬁlter function applied to frequencies.
+B. Global Placement
+A placement instance can be formulated as a graph G=
+(V,E)with a set of objects V(e.g., IOs, macros, and standard
+cells) and edges E. The main objective of placement f(g)[see
+(3)] is to ﬁnd a solution g∈RN×2with minimized total
+wirelength S(g)subject to density constraints (i.e., the density
+ρb(g)does not exceed a predetermined density ρt), where N
+is the number of objects.
+minf(g)=S(g) s.t.ρ b(g)≤ρt. (3)
+The total wirelength S(g)can be estimated as the weighted
+sum of squared distances between connected objects:
+S(g)=/summationdisplay
+(vi,vj)∈Ewi,j/parenleftBig
+(xi−xj)2+(yi−yj)2/parenrightBig
+. (4)
+Considering one net with Mpins, we set the weight w=
+(2/M).
+The placement area can be evenly partitioned into a series
+of grids (bins) [1]. The density of each grid bis computed
+using the formula in (5):
+ρb(g)=/summationdisplay
+v∈Vlx(v,b)ly(v,b) (5)
+where lx(v,b)andly(v,b)quantify the horizontal and vertical
+overlaps between the grid band the object v.
+III. M ETHOD
+In this section, we ﬁrst explore the placement process
+from the perspective of GSP and highlight the importance ofsmoothness for chip placement. Then we present GiFt, the
+parameter-free placement initialization approach, and demon-
+strate its efﬁcacy via theoretical analysis. Finally, we provethat both the classic eigenvector-based placer [7],[8]and
+recently emerged GCN-based placer [4],[5]are special cases
+of the proposed approach, while both of them introduce extracomputations and complexity.
+A. Enhancing Placement From GSP Perspective
+As demonstrated in (1)and(4), the optimization objective
+in placement, which aims to minimize quadratic wirelength,
+aligns with the goal of enhancing graph signal smoothness
+from the perspective of GSP. Inspired by this ﬁnding, wereframe the placement problem as an effort to improve the
+smoothness of graph signals on given circuit graphs. Next, we
+explain how we can improve the smoothness of graph signals
+across the graph.
+The normalized form of the smoothness measurement [as
+depicted in (1)] can be calculated using the Rayleigh quotient,
+as shown below:
+R(g)=S(g)
+||g||2
+2=/summationtext
+(vi,vj)∈Ewi,j/parenleftbig
+gj−gi/parenrightbig2
+/summationtext
+vi∈Vg2
+i=gTLg
+gTg.(6)The smaller value of R(g)indicates higher smoothness of
+graph. Leveraging the GFT, we can transform (6)as follows:
+R(g)=gTLg
+gTg=gTU/Lambda1UTg
+gTUUTg=ˆgT/Lambda1ˆg
+ˆgTˆg=/summationtext
+vi∈Vλiˆgi2
+/summationtext
+vi∈Vˆgi2.(7)
+It is evident from (7)that R(gi)=λi, where gidenotes the
+graph signal deﬁned on node vi, andλidenotes ith eigenvalue
+of the graph Laplacian. This demonstrates that graph signals
+associated with lower eigenvalues (i.e., lower frequencies)
+exhibit a higher degree of smoothness. Consequently, it
+becomes essential to ﬁlter out undesired frequencies, partic-ularly the high-frequency components in graph signals, to
+enhance the smoothness of these signals, thereby obtaining
+optimized placement solutions.
+Building on this insight, we present our placement frame-
+work through the lens of GSP.
+Given the input graph signals g∈R
+N×2, which can repre-
+sent the initial cell locations, potentially containing unwanted
+noises, we apply a graph ﬁlter Htogto ﬁlter out undesired
+frequencies and obtain the ﬁltered signals g/prime∈RN×2, which
+represents the cell locations processed by the graph ﬁlter. The
+framework can be expressed as follows:
+g/prime=Hg=Udiag(h(λ1),h(λ2) ,..., h(λn))UTg (8)
+where h(·)is a ﬁlter function deﬁned on eigenvalues. This
+process can be interpreted from a GSP perspective: Givena graph signal g, it is initially transformed from the spatial
+domain to the spectral domain via the GFT. Subsequently,
+unwanted frequencies within the signal are removed using theﬁlter h(·), and ﬁnally, the ﬁltered signal is transformed back
+into the spatial domain through the inverse GFT.
+Since the smoothness of graph signals is closely linked to
+the minimization of placement wirelength, a straightforward
+approach is to develop an ideal low-pass ﬁlter that directly
+eliminates all high-frequency signals. This can be formulatedas follows:
+h(λ
+i)=/braceleftbigg1,ifλi<λ t
+0,otherwise(9)
+where λtdenotes the cut-off frequency. Then the ﬁltered
+signals g/primeare given by
+g/prime=Hg=Udiag⎛
+⎝t/bracehtipdownleft/bracehtipupright/bracehtipupleft/bracehtipdownright
+1,..., 1,n−t/bracehtipdownleft/bracehtipupright/bracehtipupleft/bracehtipdownright
+0,..., 0⎞
+⎠UTg=UtUT
+tg.(10)
+Although this approach guarantees the global smoothness
+of graph signals, it requires eigendecomposition to obtain the
+eigenvectors corresponding to the ﬁrst klowest eigenvalues,
+which is a computationally expensive task for large-scale
+circuits. In addition, it is essential to note that globally
+smooth signals overlook valuable local information, whichcan be characterized as globally high-frequency yet locally
+smooth [10]. This oversight may lead to an over-smoothing
+issue, where neighboring locations become too similar, result-ing in high overlap in local areas and violations of density
+constraints (see Section III-C for more details).
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+LIU et al.: EFFICIENT PLACEMENT SPEEDUP TECHNIQUE 3927
+Fig. 1. Workﬂow of GiFt-equipped placement process.
+To this end, we need to thoughtfully devise a new graph
+ﬁlter that is computationally efﬁcient while considering mul-
+tiresolution smooth signals, thereby yielding optimized cell
+locations g/primethat have minimized total wirelength (representing
+smoothness over the graph structure) and reduced overlap (i.e.,
+avoid over-smoothing).
+B. GiFt: Efﬁcient Placement Initialization Technique
+This section introduces GiFt, a GSP-based placement
+initialization approach for chip placement acceleration. GiFt
+functions as an efﬁcient graph ﬁlter, utilizing multifrequencygraph signals for comprehensive graph structural analysis and
+the generation of optimized cell locations. It can be seamlessly
+integrated with analytical placers to produce high-qualityplacement solutions while signiﬁcantly reducing placement
+time. The GiFt-equipped placement process is depicted in Fig. 1.
+1) Algorithm of GiFt: This section presents the theoretical
+underpinnings of GiFt.
+From the perspective of GSP, the normalized adjacency
+matrix ˜Aof the given circuit graph corresponds to the ﬁlter
+function h(λ)=1−λ. The theoretical proof is as follows.
+Theorem 1: The normalized adjacency matrix ˜A=
+D
+−(1/2)AD−(1/2)is a graph ﬁlter corresponding to the ﬁlter
+function h(λ)=1−λ.
+Proof: As the eigendecomposition of the normal-
+ized graph Laplacian is given by ˜L= U/Lambda1UT=
+Udiag(λ1,λ2,...,λ n)UT,˜Lcorresponds to the ﬁlter function
+h(λ)=λ.
+Since we have L=D−A, then
+˜L=D−1
+2LD−1
+2=D−1
+2(D−A)D−1
+2=I−D−1
+2AD−1
+2.(11)
+Letuidenote the eigenvector corresponding to the eigen-
+valueλi, and Lui=λiui,w eh a v e
+Lui=/parenleftBig
+I−D−1
+2AD−1
+2/parenrightBig
+ui=λiui. (12)
+It can be transformed to
+D−1
+2AD−1
+2ui=(1−λi)ui (13)
+which indicates that ˜Ais a graph ﬁlter corresponding to the
+ﬁlter function h(λ)=1−λ, that is
+˜A=U/Lambda1AUT=Udiag(1−λ1,1−λ2,..., 1−λn)UT.(14)
+Since the eigenvalues of the normalized Laplacian fall
+within the interval of [0 ,2],˜Aacts as a band-stop ﬁlter that
+attenuates intermediate-frequency components, which is not
+effective for denoising graph signals.To address this problem, we introduce two enhancements
+to˜Ato boost its denoising ability. First, we add self-
+loops to ˜A(called augmented ˜A)to shrink high-frequency
+components (e.g., large eigenvalues) [11], thereby removing
+high-frequency noises. As depicted in Fig. 2(a), by adding
+self-loops as follows A=A+σI[where σ=0,1,2,3
+in Fig. 2(a)], the large eigenvalues become smaller, leading
+the augmented ˜Ato perform like a low-pass ﬁlter. It is
+important to note that if σis too large, most eigenvalues will
+approach zero, rendering the graph ﬁlter less effective in noiseremoval. Second, we generalize the augmented ˜Ato˜A
+k.T h i s
+modiﬁcation transforms its corresponding ﬁlter function from
+h(λ)=1−λtohk(λ)=(1−λ)k, where kcontrols the strength
+of the graph ﬁlter. Fig. 2(b) and (c) show the ﬁlter strength
+associated with ˜Aand augmented ˜Afor various values of k.A s
+kincreases, the low-pass ﬁltering effect of the augmented ˜A
+becomes more pronounced. The underlying dataset for Fig. 2
+is mgc_edit_dist_1 benchmark in the ISPD2014 benchmarksuite [12]. To this end, by adjusting the values of σandk,
+we can effectively regulate the extent to which high-frequency
+signals are ﬁltered out, ultimately achieving smooth signalsacross multiple resolutions.
+Building upon this analysis, we propose GiFt, functioning
+as multifrequency graph ﬁlters, to generate optimized celllocations as follows:
+g
+/prime=GiFt(g)=α0˜A2
+2g+α1˜A2
+4g+α2˜A4
+4g. (15)
+Here, ˜A2
+1,˜A2
+2, and ˜A3
+4all function as low-pass ﬁlters with
+varying degrees of ﬁltering strength, which are formulated as
+follows:
+˜A2
+2=/parenleftBig
+(D+2I)−1
+2(A+2I)(D+2I)−1
+2/parenrightBig2
+˜A2
+4=/parenleftBig
+(D+4I)−1
+2(A+4I)(D+4I)−1
+2/parenrightBig2
+˜A4
+4=/parenleftBig
+(D+4I)−1
+2(A+4I)(D+4I)−1
+2/parenrightBig4
+. (16)
+To differentiate, we refer to ˜A2
+2as a high-pass ﬁlter that
+allows some relatively high-frequency signals to pass throughto capture local information. ˜A
+2
+4corresponds to a medium-
+pass ﬁlter , and ˜A4
+4represents a low-pass ﬁlter designed to
+exclusively preserve low-frequency signals, thereby enhancingglobal smoothness. α
+0,α1andα2are weight coefﬁcients
+that determine the proportion of globally smooth signals
+and locally smooth signals. gsymbolizes the input signals,
+representing the initial cell locations. g/primedenotes denoised
+graph signals, i.e., cell locations produced by GiFt.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+3928 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 44, NO. 10, OCTOBER 2025
+(a) (b) (c)
+Fig. 2. Eigenvalue distributions of normalized Laplacians with different graph ﬁlters: (a) under different self-loops. (b) with ˜Aﬁlter at various k, (c) with
+augmented ˜Aﬁlter at various k.
+Algorithm 1 GiFt-Placer Algorithm
+Input: A circuit netlist modeled by an undirected weighted graph G=(V,E)
+Output: Legalized placement result,
+1: Set initial locations gof cells v∈V. Locations of movable cells are
+placed at the center of the placement region and 1Tg(i)=0. Fixed cells
+are set at their predetermined locations.
+2: Compute optimized cell locations g/primeusing GiFt: g/prime=α0˜A2
+2g+α1˜A4
+2g+
+α2˜A4
+4g
+3: Input g/primeto subsequent placer to complete placement task
+4:return The legalized placement result
+The input signal g includes the movable cell locations
+gmand the ﬁxed cell locations gf, i.e., g={gm,gf}.gm
+can be regarded as a random vector, represented as a linear
+combination of the eigenvalues of the graph Laplacian. We
+utilize multifrequency graph ﬁlters to effectively eliminate
+unwanted frequencies from the random graph signal gm.T o
+this end, we introduce an initial location strategy .gmis
+conﬁgured as a set of 2-D random vectors orthogonal to the all-one vector, ensuring that 1
+Tg(i)=0. The ﬁxed cell locations
+gfare placed at their predetermined locations.
+2) Workﬂow of GiFt-Equipped Placement Process: Since
+density constraints are not rigorously enforced in (15),t h e
+predicted solutions g/primecan undergo further reﬁnement through
+the subsequent placer. By integrating GiFt with the analyticalplacer, we develop the ultrafast placement ﬂow GiFt-Placer.
+The algorithm of GiFt-Placer is summarized in Algorithm 1.
+Given a circuit netlist, we use clique net model [13] to convert
+it into a weighted graph G. The graph is then processed by
+GiFt to generate optimized cell locations g
+/prime(lines 1 and 2).
+g/primeis then fed into the analytical placer, serving as the starting
+point for placement optimization, to complete the placement
+task with substantially reduced iteration time (lines 3 and 4).
+C. Strength and Computation of GiFt
+The primary strengths of GiFt can be summarized into three
+key aspects.
+1)Denoising Ability: GiFt effectively generates denoised
+graph signals (i.e., optimized cell locations) based onthe graph topology.
+2)Control of Signal Filtering Strength: GiFt can integrate
+multifrequency graph signals to achieve smoothness
+across multiresolutions of the graph.
+3)Computational Efﬁciency: GiFt maintains low computa-
+tional complexity through sparse matrix multiplication.This section provides further evidence to demonstrate these
+capabilities of GiFt.
+1) Denoising Ability: As theoretically proven in
+Section III-B , given random initial cell locations, GiFt
+thoroughly explores the circuit graph topology to generate
+denoised graph signals (i.e., optimized cell locations). Thissection provides numerical examples to illustrate its denoising
+ability.
+We start with randomly placing 20 cells within an [0 ,1]×
+[0,1] square and constructing a weighted graph based on the
+physical distances between cells, with closer cells receiving
+higher edge weights. The graph structure is shown in Fig. 3.
+Following this, we apply the initial signal strategy to distribute
+cells across the chip region, which can be considered a noisysignal. We use Morton code [14] to map the 2-D coordinates
+into one dimension values while preserving the locality of
+the data points, and we color the cells according to theirvalues. As shown in Fig. 3(a), highly connected cells display
+different colors, indicating the inconsistent distribution of
+noisy signals across the graph structure. Fig. 3(b) presents
+the denoised signal using GiFt, where highly connected cells
+appear in similar color, demonstrating that they are closely
+distributed in 2-d coordinates. This effectively demonstratesGiFt’s capability to denoise graph data.
+2) Control of Signal Filtering Strength: The strength of the
+proposed graph ﬁlter ˜A
+k
+σis controlled by the parameters σ
+andk. As described in Section III-B , larger values of σandk
+result in a stronger ﬁlter for high-frequency signals. However,large values also lead to over-smoothing issue, which violates
+the density constraints. Therefore, selecting appropriate values
+forσand kis crucial to balancing the ﬁlter’s strength and
+avoiding over-smoothing.
+Fig. 4visualizes the raw and ﬁltered cell locations produced
+by GiFt with different combinations of σand k. Highly
+connected cells are indicated by the same color. As σand
+kincrease, GiFt yields smoother embeddings, resulting in
+more tightly packed clusters structure, particularly for highlyconnected cells. However, this clustering violates density
+constraints. Moreover, a high value of kalso increases com-
+putational complexity, as discussed in Section III-C3 .T o
+effectively explore multiresolution graph topology information
+and balance signal smoothness with computational complexity,we use a combination of ﬁlters, α
+0˜A2
+2+α1˜A4
+2+α2˜A4
+4,t o
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+LIU et al.: EFFICIENT PLACEMENT SPEEDUP TECHNIQUE 3929
+(a) (b) (c)
+Fig. 3. Denoising example. (a) Noisy signal. (b) Denoised signal using GiFt. (c) Denoised signal using eigenvectors.
+(a) (b)
+(d) (c)
+(e) (f)
+(h) (g)
+Fig. 4. Placement results with different ﬁlters. (a) Random initial locations.
+(b) Placement results predicted by GiFt. (c) Placement results with ˜A8
+4.
+(d) Placement results with ˜A6
+4. (e) Placement results with ˜A4
+4. (f) Placement
+results with ˜A4
+2. (g) Placement results with ˜A2
+2. (h) Placement results with ˜A1
+1.
+generate optimized cell locations. The efﬁcacy of this approach
+is supported by experimental results in Section VI.
+3) Computation Efﬁciency: The computation of GiFt
+involves the operation ˜Ak
+σg, where ˜Ak
+σis a multifrequencygraph ﬁlter and grepresents the initial cell locations, sized N×
+2 with Nbeing the number of cells. For a sparse graph, ˜Ak
+σ=
+((D+σI)−(1/2)(A+σI)(D+σI)−(1/2))kis the multiplication
+of sparse matrices. Let edenote the number of nonzero entries
+in˜Aσ, with e/lessmuchN2. Therefore, computing ˜Ak
+σginvolves
+repeatedly left-multiplying gby˜Aσforkiterations, resulting
+in a computational complexity of O(2ek).
+We conclude the power of GiFt for chip placement as
+follows.
+1)Reduced Iteration Count: As GiFt can capture compre-
+hensive graph structures from globally smooth signals to
+locally smooth ones, it can produce optimized cell loca-
+tions with reduced overlap. By integrating the predictedlocations with analytical placers, the placement process
+beneﬁts from signiﬁcantly reduced iterations, as the
+locations predicted by GiFt provide clear and valuableguidance for the subsequent optimization process.
+2)Low Computation Complexity: GiFt excels in efﬁciency
+through sparse matrix multiplication. Its calculation only
+involves the normalization of the adjacency matrix,
+eliminating the need for the time-consuming parameterlearning process with back-propagation.
+IV . R
+EVISIT EXISTING PLACERS FROM GSP P ERSPECTIVE
+This section analyzes the classic eigenvector-based placer
+and recently emerged GCN-based placer from the GSP per-
+spective. It is proved that both of them are special cases ofthe proposed approach with different graph ﬁlters.
+A. Eigenvector-Based Placer
+The classic eigenvector-based placer [7]assumes that all
+cells are movable. They use the eigenvectors corresponding
+to the second and third smallest eigenvalues as cell locations.
+From the GSP perspective, it is an ideal low-pass ﬁlter thatonly saves the lowest frequencies. The corresponding ﬁlter
+function can be deﬁned as
+h(λ
+i)=/braceleftbigg1,if 1<i≤3
+0,otherwise .(17)
+As eigenvectors (graph signals in the spectrum domain) are
+directly employed to represent cell locations, there is no need
+to transform them into the spatial domain using inverse GFT
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+3930 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 44, NO. 10, OCTOBER 2025
+U. Therefore, the ﬁltered signal can be calculated by
+g/prime=diag(0,1,1,0,..., 0)U=[u2,u3]. (18)
+Although this method achieves signal smoothness, it incurs
+high computational costs when applied to large-scale circuits
+due to the necessity of eigendecomposition. Moreover, as
+demonstrated in Section III-A , conﬁning graph signals to
+merely the lowest-frequency components leads to the loss of
+valuable information present in higher-frequency components,
+yielding suboptimal solutions. Fig. 3(c) illustrates the denois-
+ing results using eigenvectors. We can see that eigenvectors
+exhibit over-smoothing issue that gathering cell 5–7 to cell
+0–4, demonstrating its ignorance for valuable information inhigher-frequency components.
+B. GCN-Based Placer
+To enhance the placement process, many recent studies
+have recruited GCNs [4],[5]for help. These studies apply
+GCNs to encode connectivity information and generate node
+embeddings for subsequent calculations.
+The GCN model operates in three main steps. First, a
+renormalization trick is applied to the adjacency matrix Aby
+adding an self-loop to each vertex, resulting in a new adjacency
+matrix A
+1=A+I. The degree matrix is also adjusted to
+D1=D+Iand then symmetrically normalized to form ˆA1=
+D−(1/2)
+1A1D−(1/2)
+1. Then, the propagation rule for each layer
+is deﬁned as follows:
+H(t+1)=F/parenleftBig
+ˆA1H(t)W(t)/parenrightBig
+(19)
+where H(t)represents the vertex feature matrix at the tth layer,
+with H(0)=gdenoting the initial feature matrix, and W(t)
+is the trainable weight matrix for the layer. The activation
+function Fis typically a nonlinear function like ReLU, deﬁned
+asRELU (·)=max(0,·). The graph convolution process in
+each layer involves multiplying the feature matrix H(t)from
+the left by renormalized adjacency matrix ˆA1, with the output
+then being projected through W(t). This setup stacks two
+layers, and the output features are apssed through a softmax
+function to generate the prediction matrix:
+Z=softmax/parenleftBig
+ˆA1ReLU(ˆA1H(0)W(0))W(1)/parenrightBig
+. (20)
+The model is trained using a loss function on labeled samples.
+In essence, GCN constructs graph ﬁltering in each layer
+with the ﬁlter ˜A1and the signal matrix H(t). By performing all
+the graph convolutions in (20), the ﬁlter of GCN is ˜A2
+1, which
+can be viewed as a special case of GiFt.
+However, GCNs introduce the learnable parameter W,
+which requires a time-consuming training process via back-
+propagation. This training overhead is redundant for efﬁcient
+chip placement. The underlying reason is that the statistical
+characteristics of graph structures can vary signiﬁcantly across
+different circuit designs, and the presence of ﬁxed cells(e.g.„ ﬁxed IOs) exacerbates this issue. Consequently, it is
+challenging to train a set of ﬁxed parameters that would be
+effective across a range of diverse designs. On the other hand,by carefully designing the graph ﬁlter, it can efﬁciently remove
+high-frequency noises and produce optimized cell locationsAlgorithm 2 GiFtPlus-Placer Algorithm
+Input: A circuit netlist modeled by an undirected weighted graph G=(V,E)
+Output: Legalized placement result.
+1: Use feGRASS to perform graph sparsiﬁcation and obtain the sparse graph
+G/prime.
+2: Set all ﬁxed cells at their predetermined locations and conduct the
+convex quadratic wirelength optimization to obtain the movable cell
+locations g1.
+3: Set cells with location constraints to zero and use GiFt to solve
+subproblem L0, yielding the solution g0.
+4: Calculate the optimized cell locations meeting location constraints g/prime=
+g0+g1
+5: Location reﬁnement based on graph ﬁlters to obtain the reﬁned version
+g/prime/prime
+6: Input g/prime/primeinto subsequent placer to complete placement task
+7:return The legalized placement result
+based on multiresolution smooth signals. As demonstrated
+in Section VI, our proposed approach without the need for
+model training, achieves competitive or superior performancecompared to GCNs, providing further evidence in support of
+our assertion.
+V. G
+IFTPLUS:ENHANCED VERSION FOR LARGE -SCALE
+CHIPPLACEMENT WITHLOCATION CONSTRAINTS
+This section introduces GiFtPlus, an enhanced version of
+GiFt, designed to 1) handle large-scale circuit placement more
+efﬁciently and 2) handle location constraints.
+A. Solution Overview
+The overall algorithmic ﬂow of GiFtPlus is depicted in
+Algorithm 2. Given a circuit netlist, it is represented as
+a weighted undirected graph using clique net model [15].
+GiFtPlus starts with conducting graph sparsiﬁcation using
+feGRASS [16] to remove less critical edges and construct an
+ultrasparse graph (see Section V-B). This step aims to improve
+the efﬁciency of GiFtPlus in large-scale circuit designs. Next,
+GiFtPlus decomposes the placement problem with locationconstraints into two subproblems based on Dirichlet boundary
+conditions. This allows each problem to be solved efﬁciently
+and jointly produce optimized cell locations while adhering
+to the location constraints (see Section V-C). The third step
+involves location reﬁnement based on graph ﬁlter to furtherenhance the quality of cell locations (see Section V-D). The
+results produced by GiFtPlus can serve as initial locations that
+efﬁciently drive downstream placers to achieve ﬁnal legalizedplacement solution with high placement quality.
+B. Efﬁciency Improvement Based on Graph Sparsiﬁcation
+The computational complexity of GiFt is O(2ek)(cf.
+Section III-C3 ), where krepresents the number of matrix
+multiplications and edenotes the number of nonzero entries in
+the adjacency matrix. Since kis user-adjustable and typically
+less than 4, edominates the computational complexity. For
+large-scale circuits with a high number of edges, apply-
+ing graph sparsiﬁcation techniques to remove less spectrallycritical edges can signiﬁcantly improve the efﬁciency of
+GiFt.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+LIU et al.: EFFICIENT PLACEMENT SPEEDUP TECHNIQUE 3931
+To this end, we utilize feGRASS [16], a fast and effective
+graph sparsiﬁcation tool, to construct an ultrasparse graph thatretains spectral properties similar to the original graph. This
+approach enhances the scalability and efﬁciency of GiFt. More
+details about feGRASS can be found in this article [16].
+C. Placement With Location Constraints
+Location constraints refer to those cells with predetermined
+locations, such as IOs. These ﬁxed cells can be regarded asthe vertex boundary [17], which act as immovable reference
+points that deﬁne the placement constraints for the movable
+cells. These constraints are imposed by application-speciﬁcrequirements and often lack statistical regularity. GiFt is difﬁ-
+cult to precisely account for the cells with ﬁxed locations. This
+section introduces a highly efﬁcient method using Dirichletboundary conditions [18], which can be integrated in GiFtPlus
+to accurately handle location constraints.
+Theorem 2: A placement problem with location con-
+straints can be decomposed into a convex quadratic
+optimization problem with location constraints and an NP-
+hard combinatorial optimization problem with homogeneous
+Dirichlet boundary conditions [18].
+Theorem 2demonstrates that the placement problem deﬁned
+as
+minL(g)=/summationdisplay
+(
+vi,vj)∈Ewi,j/parenleftBig
+(xi−xj)2+(yi−yj)2/parenrightBig
+s.t.ρ ( g)≤ρt (21)
+can be decomposed to the following two subproblems:
+minL(g)=minL1/parenleftBig
+g1/parenrightBig
++/parenleftBig
+minL0(g0)s.t.ρ ( g0)≤ρt/parenrightBig
+(22)
+where
+L1/parenleftBig
+g1/parenrightBig
+=/summationdisplay
+(vi,vj)∈Ewi,j/parenleftBig
+(x1
+i−x1
+j)2+(y1
+i−y1
+j)2/parenrightBig
+L0/parenleftBig
+g0/parenrightBig
+=/summationdisplay
+(vi,vj)∈Ewi,j/parenleftBig
+(x0
+i−x0
+j)2+(y0
+i−y0
+j)2/parenrightBig
+s.t.ρ/parenleftBig
+g0/parenrightBig
+≤ρt. (23)
+Subproblem L1:This subproblem focuses on minimizing the
+total wirelength while ensuring that all ﬁxed cells remain attheir predetermined locations. The optimization of L
+1can be
+divided into x- and y-components, both of which are convex
+quadratic optimization problems. These can be solved bysetting the partial derivatives of L
+1
+x(g1)andL1
+y(g1)to zero [19].
+Subproblem L0:The goal of L0is to minimize the total
+wirelength with all ﬁxed cells set to zero (i.e., satisfying
+Dirichlet boundary conditions) while reducing overlap, akin to
+a conventional placement problem without ﬁxed cells. As it
+is an NP-hard combinatorial problem [20] and challenging to
+solve efﬁciently, previous work [18] proposes a GNN-based
+model for this task. However, as discussed in Section IV,
+GNN-based models require extensive time and data for modeltraining, and it is challenging to guarantee their generalization.
+Since GiFt can efﬁciently captures graph structure informationand produces optimized cell locations, we employ GiFt to
+handle this subproblem.
+Placement Solution: The optimized placement solution that
+satisﬁes location constraints is obtained by summing the
+solution g
+1
+iofL1and the solution g0
+iofL0, that is
+gi=g0
+i+g1
+ii∈/tildewideV. (24)
+D. Location Reﬁnement
+We apply location reﬁnement process based on the graph
+ﬁlter to further improve the quality of cell locations produced
+by GiFtPlus. Speciﬁcally, we smooth the cell locations gacross
+the graph by optimizing the following objective:
+min{||g−g/prime||2
+2+tr/parenleftbig
+g/primeTLg/prime/parenrightbig
+} (25)
+where gdenotes the cell locations determined in Section V-C,
+which contain both movable and predetermined ﬁxed celllocations. g
+/primedenotes the reﬁned cell locations, and Ldenotes
+the graph Laplacian matrix. The ﬁrst term ensures that the
+reﬁned cell locations g/primeagrees with the cell locations g, while
+the second term promotes the smoothness of the graph.
+By setting the derivative of (25) to zero, we arrive at the
+following expression:
+g/prime=(I+L)−1g. (26)
+Since Lassociates with the ﬁlter function λas proved in
+Theorem 1,(I+L)−1can be transformed into the spectral
+domain. This transformation yields the graph ﬁlter:
+h(λ)=(1+λ)−1. (27)
+Then we approximate h(λ)using its ﬁrst-order Taylor expan-
+sion:
+ˆh(λ)=1−λ. (28)
+By transforming ˆh(λ)back into the spatial domain, we obtain:
+ˆh(L)=I−L=D−1
+2AD−1
+2=˜A. (29)
+To further enhance the ﬁltering capability, we can add self-
+loops σand a scaled coefﬁcient kinto (29) according to
+Section III-B1 . Finally, the reﬁned cell locations can be
+obtained by
+g/prime=˜Ak
+σg (30)
+This article experimentally set both σandkto 2.
+VI. E XPERIMENTAL RESULTS
+This section evaluates the performance of GiFt and
+GiFtPlus using the public benchmark suite ISPD2005 [21],
+ISPD2006 [22], ISPD2014 [12] and TILOS MacroPlacement
+Testcases [23].
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+3932 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 44, NO. 10, OCTOBER 2025
+TABLE I
+STATISTICS OF ISPD2005 P LACEMENT BENCHMARKS
+TABLE II
+STATISTICS OF ISPD2006 P LACEMENT BENCHMARKS
+A. Experiment Settings
+GiFt and GiFtPlus are implemented in Python with PyTorch.
+The coefﬁcients α0,α1andα2in(15) are set to 0.1, 0.7
+and 0.2, respectively. We integrate GiFt and GiFtPlus with
+two state-of-the-art placers, RePlAce [2]and GPU-accelerated
+DREAMPlace [3], to construct GiFt-RePlAce, GiFtPlus-
+RePlAce and GiFt-DREAMPlace, GiFtPlus-DREAMPlace
+placement ﬂows. The integration involves using GiFt-
+generated cell locations as starting points for movable cells
+in both RePlAce and DREAMPlace. The density constraints
+follow the speciﬁcations provided in the benchmarks. Thenthese placers complete the placement process, resolving over-
+laps and producing legalized placement results.
+To show the efﬁcacy of GiFt and GiFtPlus, we evaluate
+HPWL and total runtime on ISPD2005 benchmark suite [21]
+(see Table I), ISPD2006 benchmark suite [22] (see Table II),
+ISPD2014 benchmark suite [12] (see Table III) and TILOS
+MacroPlacement testcases [23] (see Table IV). We compare
+GiFt-DREAMPlace and GiFtPlus-DREAMPlace against sev-
+eral other competitors, including recently proposed placementinitialization work: Chen’s work1 [24] and Chen’s work2 [25].
+To support the ideas proposed in Section IV,w ea l s oc o m -
+pare our proposed work with the eigenvector-based initialplacement [7]-DREAMPlace (EI-DREAMPlace for short), an
+initial placement (using the eigenvectors corresponding to the
+second and third smallest eigenvalues) and placement ﬂow, andGraphPlanner-DREAMPlace [4], a state-of-the-art integrated
+GCN-based ﬂoorplanning and placement ﬂow. Additionally,
+we illustrate that GiFtPlus can generate informative clusters,
+meaning that highly connected cells remain intact before and
+after placement.
+RePlAce, GiFt-RePlAce, GiFtPlus-RePlAce, and Chen’s
+works are performed on a workstation with Intel i7-7700
+3.6 GHz CPU and 16 GB memory. All other experiments areconducted on a Linux server with 16-core Inter Xeon Gold
+6226R @ 2.9 GHz and NVIDIA 2080 Ti GPU.TABLE III
+STATISTICS OF ISPD2014 P LACEMENT BENCHMARKS
+TABLE IV
+STATISTICS OF TILOS M ACROPLACEMENT TESTCASES
+B. Placement Performance
+1) Comparison to the State-of-the-Art Placers: Tables V
+and VIpresent the placement results using ISPD2014
+benchmarks. The execution time of GiFt and GiFtPlus is
+less than 5 s on the CPU platform and less than 3 s
+on the GPU platform. From the result we can see thatGiFtPlus-DREAMPlace outperforms both GiFt-DREAMPlace
+and DREAMPlace alone. Speciﬁcally, compared to GiFtPlus-
+DREAMPlace, GiFt-DREAMPlace and DREAMPlace aloneresult in 0.5% and 0.1% worse HPWL, require 8% and 44%
+more placement iterations, and incur 3% and 51% longer total
+runtime, respectively. Compared to GiFtPlus-RePlAce, GiFt-RePlAce and RePlAce alone result in 0.3% and 0.1% worse
+HPWL, require 10% and 48% more placement iterations, and
+incur 2% and 54% longer total runtime, respectively.
+We further evaluate the proposed method using
+larger benchmarks, including ISPD2006 and TILOS
+MacroPlacement Testcases on CPU platform. As shownin Table VII, with similar HPWL (an average of 0.1%
+improvement by GiFtPlus), DREAMPlace uses 31% more
+runtime than GiFtPlus. As shown in Table VIII, with similar
+HPWL (an average of 0.2% improvement by GiFtPlus),
+RePlAce uses 87% more runtime than GiFtPlus. Theseresults demonstrate the efﬁcacy of the proposed approach
+in accelerating the placement process while delivering high-
+quality placement solutions.
+Fig. 5(a) and (b) presents cell locations produced by GiFt
+and GiFtPlus on mgc_matrix_mult benchmark, respectively.
+To investigate the effect of GiFt and GiFtPlus, we compare thedensity curves during placement. As illustrated in Fig. 5(c),
+both GiFt and GiFtPlus can effectively drive the placer to
+bypass the time-consuming initialization process and com-plete placement with signiﬁcantly fewer iterations. Notably,
+GiFtPlus outperforms GiFt as it more precisely consider
+location constraints. Owing to the high efﬁciency of GiFtand GiFtPlus, the total runtime of the placement process is
+substantially reduced.
+2) Informative Cluster: We further investigate the struc-
+tural information of the cell locations generated by GiFtPlus.Fig. 6(a1) and (b1) present the locations of movable cells
+predicted by GiFtPlus on mgc_matrix_mult benchmark and
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+LIU et al.: EFFICIENT PLACEMENT SPEEDUP TECHNIQUE 3933
+Fig. 5. (a) Cell locations produced by GiFt. (b) Cell locations produced by GiFtPlus. (c) Density curves during placement.
+TABLE V
+EXPERIMENTAL RESULTS ON ISPD2014 B ENCHMARKS USING GPU P LATFORM .VALUES IN PARENTHESES
+REPRESENT THE TIMESPENT BY GIFT AND GIFTPLUS
+TABLE VI
+EXPERIMENTAL RESULTS ON ISPD2014 B ENCHMARKS USING CPU P LATFORM .VALUES IN
+PARENTHESES REPRESENT THE TIMESPENT BY GIFT AND GIFTPLUS
+TABLE VII
+PLACEMENT HPWL (10^7) AND TOTAL RUNTIME (S)
+ONISPD2006 B ENCHMARKS
+mgc_pci_bridge32_1 benchmark, respectively. We apply K-
+Means clustering to the cells based on the locations produced
+by GiFtPlus, assigning the same color to cells within the same
+cluster. GiFt-driven placement results are shown in Fig. 6(a2)
+and (b2). Fig. 6(a3) and (b3) illustrate the placement results
+produced by DREAMPlace alone.TABLE VIII
+PLACEMENT HPWL (10^9) AND TOTAL RUNTIME (S)RESULTS ON
+TILOS M ACRO PLACEMENT TESTCASES
+From Fig. 6(a1)–(a3), we can see that highly connected
+movable cells remain intact before and after the global
+placement. With similar placement quality (0.3% HPWL
+improvement by GiFtPlus), DREAMPlace uses 49% more
+iterations than GiFtPlus on this benchmark. Fig. 6(b1)–(b3)
+illustrate that the cell distributions produced by GiFtPlus-
+DREAMPlace closely match the distributions predicted by
+GiFtPlus, in contrast to those produced by DREAMPlacealone. In this benchmark, DREAMPlace exhibits performance
+that is 11% and 57% worse, respectively, in terms of HPWL
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+3934 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 44, NO. 10, OCTOBER 2025
+Fig. 6. Visualization of the effect of cluster information predicted by GiFtPlus. (a) The locations of movable cells predicted by GiFtPlus on mgc_mat rix_mult
+benchmark. (b) GiFtPlus-DREAMPlace placement result on mgc_matrix_mult benchmark. (c) DREAMPlace placement result on mgc_matrix_multbenchmark. (d) The locations of movable cells predicted by GiFtPlus on mgc_pci_bridge32_1 benchmark. (e) GiFtPlus-DREAMPlace placement result onmgc_pci_bridge32_1 benchmark. (f) DREAMPlace placement result on mgc_pci_bridge32_1 benchmark.
+and the number of placement iterations, when compared
+to GiFtPlus-DREAMPlace. These results demonstrate thatGiFtPlus effectively forms informative clusters that guide
+downstream placers to produce high-quality placement results
+with signiﬁcantly reduced iterations.
+3) Comparison to Other Initial Placement Strategies:
+We compare GiFt and GiFtPlus with recently proposedplacement initialization method: Chen’s work1 (Projected
+Eigenvectors) [24] and Chen’s work2 (Projected
+Eigenvectors+SSM) [25]. Since work1 and work2 do not
+use GPU acceleration, for a fair comparison, We run work1,
+work2, DREAMPlace, GiFt, and GiFtPlus on the CPU
+platform. Experimental results in Table IXshow that work1
+and work2 require 98% and 22x more placement runtime,
+respectively, compared to GiFtPlus.
+Speciﬁcally, Chen’s work1, Chen’s work2 and our proposed
+method all aim to enhance placement initialization to beneﬁt
+subsequent placers. These methods all formulate the placement
+initialization to a quadratic optimization problem. But wehave different focuses and use different methodologies to
+solve it. Chen’s work focus on improving the quality of
+placement results at the expense of increased runtime. They
+formulate the placement initialization problem as a quadratic-
+constrained quadratic programming (QCQP) problem withquadratic equality constraints, solving it using an iterative
+projected-subspace-descent algorithm, which suffers extremely
+large runtime overhead. On the other hand, our approachfocuses on accelerating the placement process. Experimental
+results demonstrate that the proposed ultrafast placementinitialization approach signiﬁcantly speedup the placement
+process without compromising placement quality. We willfurther enhance GiFtPlus to improve its placement quality in
+future work.
+To support the ideas proposed in Section III-C ,w ef u r -
+ther compare GiFt and GiFtPlus with eigenvector-based
+initial placement and GNN-based initial placement. Table X
+presents the placement results with different initial placement-placement ﬂows. The GPU version of DREAMPlace is used
+as the subsequent placer in this experiment. Compared with
+EI-DREAMPlace and GraphPlanner-DREAMPlace, GiFtPlus-
+DREAMPlace achieves 0.6% and 1% improvements in
+HPWL, 16% and 14% reductions in the number of iterations,and 61% and 3 ×reductions in total runtime. This result
+reinforces the ﬁndings presented in Section III-C and further
+proves the efﬁcacy of GiFt and GiFtPlus in accelerating theplacement process.
+4) Runtime Breakdown: We analyze the runtime break-
+down of GiFt-DREAMPlace and GiFtPlus-DREAMPlace onnewblue7 benchmark, which is the largest design among
+ISPD2006 benchmarks.
+The calculation of GiFt mainly involves multiple sparse
+matrix multiplications (see Section III-C ). It accounts for 3%
+of the total runtime, and the remaining 97% is spent onplacement.
+For GiFtPlus, it includes several steps as described in
+Section V-A. Speciﬁcally, 1% of the total runtime is consumed
+by graph sparsiﬁcation, 5% by solving two decomposed sub-
+problems, 2% by the location reﬁnement, and the remaining
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+LIU et al.: EFFICIENT PLACEMENT SPEEDUP TECHNIQUE 3935
+TABLE IX
+PLACEMENT HPWL (10^7) AND TOTAL RUNTIME (S)RESULTS ON ISPD2005 B ENCHMARKS .“ R ANDOM ”
+REPRESENTS THE RANDOM INITIALIZATION ,W HICH IS USED AS THE DEFAULT INITIALIZATION APPROACH IN DREAMP LACE .
+ALLINITIALIZATION APPROACHES AREINTEGRATED WITHDREAMP LACE
+TABLE X
+EXPERIMENTAL RESULTS ON ISPD2014 B ENCHMARKS .INT H E “EI-DREAMP LACE ”COLUMN ,THE VALUES IN PARENTHESES REPRESENT THE TIME
+TAKEN FOR EIGENDECOMPOSITION .INT H E “GRAPH PLANNER -DREAMP LACE ”COLUMN ,THE VALUES IN PARENTHESES REPRESENT MODEL
+TRAINING TIME.INT H E “GIFT-DREAMP LACE ”COLUMN ,THE VALUES IN PARENTHESES REPRESENT THE TIMESPENT BY GIFT.
+“GIFTPLUS-DREAMP LACE ”COLUMN ,THE VALUES IN PARENTHESES REPRESENT THE TIMESPENT BY GIFTPLUS
+92% is due to the placement. Note that two decomposed
+subproblems (L0and L1)can be solved in parallel. Of the
+total runtime, 3% is spent on solving L0using GiFt, and 5%
+is spent on solving L1using convex quadratic optimization.
+Therefore, solving both subproblems together accounts for 5%
+of the total runtime.
+VII. D ISCUSSION
+This section provides the theoretical foundations about
+why GiFt and GiFtPlus can drive the gradient descent-basedmethod (e.g., DREAMPlace) to efﬁciently solve the placement
+problem.
+The placement problem is a nonconvex nonlinear optimization
+problem. Gradient-descent methods, such as DREAMPlace and
+RePlAce require a large number of optimization iterations and
+are prone to falling into local optima. A critical factor inﬂuencingthe solution quality of these gradient-descent methods is their
+dependency on the initial solution [26]. Our GSP-based method
+provides an optimized starting point for subsequent placers,that is, it allows gradient descent-based placers to begin the
+optimization process from a more advantageous position. As a
+result, the placement problem can be tackled more effectively,
+leading to high-quality solutions with a signiﬁcantly reduced
+number of iterations.
+Speciﬁcally, conventional analytical placers heuristically set
+the initial locations of movable cells at the center of the
+placement region with minimum wirelength yet high overlap,and spread cells out based on an iteratively increasing density
+penalty. Such an initialization process requires a long iterationtime. Our GSP-based method streamlines this process. It
+can efﬁciently predict optimized cell locations, character-
+ized by both locally and globally smooth graph signals. As
+demonstrated in this article, this methodology aligns with theobjective of optimizing total wirelength while maintaining
+low overlap. The predicted cell locations serve as the starting
+point for subsequent placers, driving them to bypass the time-consuming initialization phase and efﬁciently converge to
+the high-quality solutions. By addressing the limitations of
+conventional methods and providing a robust starting point
+for optimization, the GSP-based approach demonstrates a
+clear advantage in solving complex, nonconvex optimizationproblems in chip placement.
+VIII. C
+ONCLUSION
+This article presents the power of GSP in accelerating
+chip placement. By underscoring the signiﬁcance of signal
+smoothness in addressing placement problems, we propose
+GiFt and its enhanced version GiFtPlus, highly efﬁcientplacement speedup techniques designed to leverage multireso-
+lution smooth signals for the generation of high-quality initial
+placement solutions. By integrating GiFt and GiFtPlus with
+analytical placers, they can substantially reduce placement
+optimization iterations without the need for time-consumingmodel training. Experimental results demonstrate that GiFt-
+Placer and GiFtPlus-Placer consistently achieve competitive or
+superior performance compared to state-of-the-art placers. Inparticular, it signiﬁcantly enhances placement efﬁciency and
+even outperforms analytical placers running on GPU versions.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+3936 IEEE TRANSACTIONS ON COMPUTER-AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS, VOL. 44, NO. 10, OCTOBER 2025
+REFERENCES
+[1] J. Lu et al., “ePlace: Electrostatics-based placement using fast fourier
+transform and Nesterov’s method,” ACM Trans. Design Autom. Electron.
+Syst. (TODAES) , vol. 20, no. 2, pp. 1–34, 2015.
+[2] C. Cheng, A. B. Kahng, I. Kang, and L. Wang, “RePlAce: Advancing
+solution quality and routability validation in global placement,” IEEE
+Trans. Comput.-Aided Design Integr. Circuits Syst. , vol. 38, no. 9,
+pp. 1717–1730, Sep. 2019.
+[3] J. Gu, Z. Jiang, Y . Lin, and D. Z. Pan, “DREAMPlace 3.0: Multi-
+electrostatics based robust VLSI placement with region constraints,” in
+Proc. IEEE/ACM Int. Conf. Comput. Aided Design. , 2020, pp. 1–9.
+[4] Y . Liu et al., “Graphplanner: Floorplanning with graph neural network,”
+ACM Trans. Des. Autom. Electron. Syst. , vol. 28, no. 2, pp. 1–24, 2022.
+[5] R. Cheng and J. Yan, “On joint learning for solving placement and
+routing in chip design,” in Proc. 35th Conf. Neural Inf. Process. Syst. ,
+vol. 34, 2021, pp. 1–12.
+[6] A. Mirhoseini et al., “A graph placement methodology for fast chip
+design,” Nature , vol. 594, no. 7862, pp. 207–212, 2021.
+[7] K. M. Hall, “An r-dimensional quadratic placement algorithm,” Manag.
+Sci., vol. 17, no. 3, pp. 219–229, 1970.
+[8] J. Frankle and R. Karp, “Circuit placements and cost bounds by
+eigenvector decomposition,” in Proc. IEEE/ACM Int. Conf. Comput.-
+Aided Design. , 1986, pp. 414–417.
+[ 9 ] D .I .S h u m a n ,S .K .N a r a n g ,P .F r o s s a r d ,A .O r t e g a ,a n d
+P. Vandergheynst, “The emerging ﬁeld of signal processing on graphs:
+Extending high-dimensional data analysis to networks and other irregulardomains,” IEEE Signal Process. Mag. , vol. 30, no. 3, pp. 83–98,
+May 2013.
+[10] J. Liu et al., “Personalized graph signal processing for collaborative
+ﬁltering,” in Proc. ACM Web Conf. , 2023, pp. 1264–1272.
+[11] F. Wu, A. Souza, T. Zhang, C. Fifty, T. Yu, and K. Weinberger,
+“Simplifying graph convolutional networks,” in Proc. Int. Conf. Mach.
+Learn. , 2019, pp. 6861–6871.
+[12] V . Yutsis, I. S. Bustany, D. Chinnery, J. R. Shinnerl, and W.-H. Liu,
+“ISPD 2014 benchmarks with sub-45nm technology rules for detailed-
+routing-driven placement,” in Proc. Int. Symp. Phys. Design , 2014,
+pp. 161–168.
+[13] N. Viswanathan and C. C.-N. Chu, “FastPlace: Efﬁcient analytical
+placement using cell shifting, iterative local reﬁnement,and a hybridnet model,” IEEE Trans. Comput.-Aided Design Integr. Circuits Syst. ,
+vol. 24, no. 5, pp. 722–733, May 2005.
+[14] G. M. Morton, A Computer Oriented Geodetic Data Base; and A New
+Technique in File Sequencing , IBM Ltd., Ottawa, ON, Canada, 1966.
+[15] N. Viswanathan and C. C.-N. Chu, “FastPlace: Efﬁcient analytical
+placement using cell shifting, iterative local reﬁnement, and a hybrid
+net model,” IEEE Trans. Comput.-Aided Design Integr. Circuits Syst. ,
+vol. 24, no. 5, pp. 722–733, May 2005.
+[16] Z. Liu, W. Yu, and Z. Feng, “FeGRASS: Fast and effective graph
+spectral sparsiﬁcation for scalable power grid analysis,” IEEE Trans.
+Comput.-Aided Design Integr. Circuits Syst. , vol. 41, no. 3, pp. 681–694,
+Mar. 2022.
+[17] F. Chung, “Random walks and local cuts in graphs,” Linear Algebra
+Appl. , vol. 423, no. 1, pp. 22–32, 2007.
+[18] Y . Liu, H. Zhou, J. Wang, F. Yang, X. Zeng, and L. Shang, “Hierarchical
+graph learning-based ﬂoorplanning with dirichlet boundary conditions,”IEEE Trans. Very Large Scale Integr. (VLSI) Syst. , vol. 32, no. 5,
+pp. 810–822, May 2024.
+[19] A. B. Kahng, J. Lienig, I. L. Markov, and J. Hu, VLSI Physical Design:
+From Graph Partitioning to Timing Closure , 1st ed. Dordrecht, The
+Netherlands: Springer, 2011.
+[20] M. R. Garey, D. S. Johnson, and L. Stockmeyer, “Some simpliﬁed
+np-complete graph problems,” Theor. Comput. Sci. , vol. 1, no. 3,
+pp. 237–267, 1976.
+[21] G. J. Nam, C. J. Alpert, P. Villarrubia, B. Winter, and M. C. Yildiz, “The
+ISPD2005 placement contest and benchmark suite,” in
+Proc. Int. Symp.
+Phys. Design (ISPD) , San Francisco, CA, USA, 2005, pp. 216–220.
+[22] G.-J. Nam, “ISPD 2006 placement contest: Benchmark suite and
+results,” in Proc. ISPD 2006, p. 167.
+[23] “TILOS MacroPlacement repository.”Accessed: May 14, 2024. [Online].
+Available: https://github.com/TILOS-AI-Institute/MacroPlacement.
+[24] P. Chen, C.-K. Cheng, A. Chern, C. Holtz, A. Li, and Y . Wang,
+“Placement initialization via a projected eigenvector algorithm: Latebreaking results,” in Proc. 59th ACM/IEEE Design Autom. Conf. , 2022,
+pp. 1398–1399.[25] P. Chen, C.-K. Cheng, A. Chern, C. Holtz, A. Li, and Y . Wang,
+“Placement initialization via sequential subspace optimization withsphere constraints,” in Proc. Int. Symp. Phys. Des. , 2023, pp. 133–140.
+[26] J. Lu et al., “ePlace-MS: Electrostatics-based placement for mixed-
+size circuits,” IEEE Trans. Comput.-Aided Design Integr. Circuits Syst. ,
+vol. 34, no. 5, pp. 685–698, May 2015.
+Yiting Liu received the B.S. degree from Northwest
+A&F University, Xianyang, China, in 2017, the M.S.
+degree from the Beijing Institute of Technology,
+Beijing, China, in 2020, and the Ph.D. degree incomputer science from Fudan University, Shanghai,
+China, in 2024.
+She is a Postdoctoral Scholar with the University
+of California at San Diego, San Diego, CA, USA.Her current research interests include electronic
+design automation, VLSI physical design, and
+machine learning.
+Hai Zhou received the B.S. and M.S. degrees in
+computer science and technology from TsinghuaUniversity, Beijing, China, in 1992 and 1994,respectively, and the Ph.D. degree in computer
+sciences from the University of Texas at Austin,
+Austin, TX, USA, in 1999.
+He is a Professor of Electrical And Computer
+Engineering with Northwestern University,
+Evanston, IL, USA. He has published more than180 papers in ﬂagship journals and conferences inthese areas. His research interests include VLSI
+computer-aided design, formal methods, and hardware security.
+Prof. Zhou was a recipient of a CAREER Award from the National Science
+Foundation.
+Jia Wang (Senior Member, IEEE) received the
+B.S. degree in electronic engineering from Tsinghua
+University, Beijing, China, in 2002, and the Ph.D.
+degree in computer engineering from NorthwesternUniversity, Evanston, IL, USA, in 2008.
+He is currently an Associate Professor of
+Electrical And Computer Engineering with Illinois
+Institute of Technology, Chicago, IL, USA. Hiscurrent research interests include computer-aideddesign of very large scale integrated circuits and
+algorithm design.
+Fan Yang (Member, IEEE) received the B.S. degree
+from Xi’an Jiaotong University, Xi’an, China, in2003, and the Ph.D. degree from Fudan University,Shanghai, China, in 2008.
+He is currently a Full Professor with the
+Microelectronics Department, Fudan University. Hisresearch interests include model order reduction,circuit simulation, high-level synthesis, acceleration
+of artiﬁcial neural networks, yield analysis, and
+design for manufacturability.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 
+LIU et al.: EFFICIENT PLACEMENT SPEEDUP TECHNIQUE 3937
+Xuan Zeng (Senior Member, IEEE) received the
+B.S. and Ph.D. degrees in electrical engineeringfrom Fudan University, Shanghai, China, in 1991and 1997, respectively.
+She is currently a Full Professor with the
+Microelectronics Department, Fudan University,where she served as the Director of the StateKey Laboratory of Application Speciﬁc Integrated
+Circuits and Systems from 2008 to 2012. She was a
+Visiting Professor with the Department of ElectricalEngineering, Texas A&M University at College
+Station, College Station, TX, USA, and the Microelectronics Department,
+Technische Universiteit Delft, Delft, The Netherlands, in 2002 and 2003,respectively. Her current research interests include analog circuit modelingand synthesis, design for manufacturability, high-speed interconnect analysis
+and optimization, and circuit simulation.
+Prof. Zeng received the Changjiang Distinguished Professor with the
+Ministry of Education Department of China in 2014, the Chinese NationalScience Funds for Distinguished Young Scientists in 2011, the First-Class of
+Natural Science Prize of Shanghai in 2012, the 10th For Women in Science
+Award in China in 2013, and the Shanghai Municipal Natural Science PeonyAward in 2014. She received the Best Paper Award from the 8th IEEE AnnualUbiquitous Computing, Electronics and Mobile Communication Conference
+2017. She is an Associate Editor of the IEEE T
+RANSACTIONS ON CIRCUITS
+AND SYSTEMS —P ART II: E XPRESS BRIEFS , the IEEE T RANSACTIONS ON
+COMPUTER -AIDED DESIGN OF INTEGRATED CIRCUITS AND SYSTEMS ,a n d
+theACM Transactions on Design Automation of Electronic Systems .
+Li Shang (Member, IEEE) received his B.S. and
+M.S. degrees from Tsinghua University, Beijing,China in 1997 and 1999, respectively, and the Ph.D.from Princeton University, Princeton, NJ, USA, in
+2004.
+He is a Professor with the School of Computer
+Science, Fudan University, Shanghai, China. He wasthe Deputy Director and the Chief Architect of
+Intel Labs China, Shanghai, China, and an Associate
+Professor with the University of Colorado Boulder,Boulder, CO, USA. His research interests include
+embedded systems, machine learning, and EDA & VLSI. He has published
+over 180 peer-reviewed papers, received multiple best paper awards andnominations, and has been cited over 9,000 times.
+Prof. Shang was a recipient of the NSF Career Award.
+Authorized licensed use limited to: Nan Tong University. Downloaded on September 23,2025 at 08:42:10 UTC from IEEE Xplore.  Restrictions apply. 

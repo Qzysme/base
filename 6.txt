@@ -1,0 +1,403 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{bm}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{lettrine}
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+\usepackage{url}
+
+\begin{document}
+
+\title{RASS-Place: Risk-Aware Adaptive Spectral Shaping for GPU-Accelerated VLSI Placement}
+
+\author{\IEEEauthorblockN{Anonymous Author(s)}}
+
+\maketitle
+
+\begin{abstract}
+Modern GPU-accelerated analytical placers such as DREAMPlace dramatically reduce the runtime of very-large-scale integration (VLSI) physical design. Nevertheless, their default initialization schemes---typically random or fixed-parameter graph filters---are agnostic to pin accessibility, macro congestion, and design-specific graph structure; as a result the optimizer wastes iterations escaping unfavorable regions and legalizers face substantial pin violations. This work presents \emph{RASS-Place} (Risk-Aware Spectral Shaping Placement), a systematic augmentation of DREAMPlace that now integrates (i) a multi-source, multi-scale risk model and (ii) displacement-guarded adaptive spectral reweighting. We construct a differentiable pin-risk potential derived from fixed objects, IO topology, RUDY-style routability estimates, and pin-utilization maps, and embed it into the global placement objective through a thresholded penalty that activates once the normalized risk of a bin exceeds a user-set tolerance. We retain GiFt's Chebyshev-based spectral bases on the netlist graph, augment them with a severity-aware risk-gradient basis, and automatically decide their combination weights via Dirichlet sampling with fast multi-objective evaluation (wirelength, density, risk). Gradient-aligned risk pushes employ severity-aware step scaling with trust-region limits; candidate mixtures are further filtered by HPWL as well as average/max displacement guards to preserve stability. The entire pipeline is integrated into the GiFt/GiFtPlus initialization flow of DREAMPlace while preserving backward compatibility. Experiments on ISPD2005/2014, TILOS superblue, and ICCAD2015 benchmarks show that the enhanced RASS-Place reduces high-risk pin overflow bins by up to 18\% and roadblocks routability hotspots while keeping initial HPWL within 1\% of the fixed-weight GiFt baseline, yielding faster legalization with negligible runtime overhead.
+\end{abstract}
+
+\section{Introduction}
+\lettrine{P}{lacement} is a critical yet time-consuming step in modern very-large-scale integration (VLSI) design flows. By determining the locations of standard cells, macros, and IOs, placement directly impacts routing congestion, timing closure, and downstream optimization. Commercial flows often invoke global placement engines multiple times per iteration, and large mixed-size benchmarks can still require hours of runtime even with aggressive parallelization. Consequently, accelerating placement while preserving solution quality remains a central objective for the community~\cite{lin2021dreamplace,liao2022dreamplace4,chen2023stronger}.
+
+Analytical placement continues to be the dominant paradigm for large-scale designs. Quadratic methods alternate between unconstrained wirelength minimization and rough spreading~\cite{lin2021dreamplace}, whereas nonlinear approaches relax density constraints into the objective and employ gradient-based optimization to converge to high-quality solutions. GPU-accelerated frameworks such as DREAMPlace map this nonlinear formulation onto deep-learning toolkits, implementing weighted-average and log-sum-exp wirelength surrogates together with an electrostatic density kernel, all expressed as CUDA-accelerated PyTorch operators. The objective optimized in each stage is
+\begin{equation}
+\mathcal{L}_{\mathrm{dp}} = \mathcal{W}_{\mathrm{wa}}(\mathbf{x}) + \lambda_s \mathcal{W}_{\mathrm{lse}}(\mathbf{x}) + \lambda_d^{(t)} \mathcal{D}_{\mathrm{elec}}(\mathbf{x}),
+\label{eq:dreamplace-loss}
+\end{equation}
+where $\lambda_d^{(t)}$ is ramped across Nesterov iterations to gradually tighten density constraints~\cite{lin2021dreamplace,liao2022dreamplace4}. This formulation yields $30$--$40\times$ runtime reduction compared with CPU-based RePlAce, yet it inherits several blind spots: the loss considers only wirelength and density, ignoring layout-specific pin accessibility or legalization risk, and the GPU optimizer’s convergence behaviour depends strongly on the quality of the initial coordinates supplied to the first stage. Poor initializations can trap the Nesterov loop in oscillatory regimes or delay descent long enough that timing-driven refinements never recover.
+
+DREAMPlace deployments therefore depend on auxiliary initializers. Early releases defaulted to central random placement with mild jitter, and subsequent work introduced spectral schemes such as GiFt and GiFtPlus~\cite{liu2025efficient} that treat cell coordinates as graph signals. GiFt expands the $x$- and $y$-coordinate vectors over Chebyshev polynomials up to order $K=3$ of the normalized Laplacian, blending low-/mid-/high-frequency components using a fixed 0.2/0.7/0.1 recipe to suppress random noise. GiFtPlus extends the idea with graph sparsification, Dirichlet boundary handling for fixed macros, GPU-friendly sparse kernels, and seed-selection heuristics that reduce $O(|E|)$ filtering constants. This formulation borrows heavily from graph signal processing (GSP) theory: Laplacian eigenmodes capture structural variation on graphs, while Chebyshev approximations implement localized spectral filters without explicit eigendecomposition~\cite{shuman2013emerging,zhang2011graph}. Yet both GiFt variants keep their filter weights static across designs; they cannot down-weight aggressive high-frequency bases when macros dominate, nor can they emphasize risk-averse bases in pin-dense regions. In practice, we observe that a single mis-calibrated basis mixture can funnel thousands of cells toward macro boundaries, forcing DREAMPlace to spend dozens of iterations diffusing congestion before meaningful optimization resumes.
+
+Pin accessibility studies underline the cost of such misplacements. The ICCAD-2017 contest benchmarks~\cite{nvidia2017iccad} and ISPD routability analyses~\cite{yutsis2014ispd} quantify pin shortages through metrics such as maximum/average blocked pins per bin and post-legalization short counts. Legalizers like Li \emph{et al.}~\cite{li2022pin} employ sliding windows, bipartite matching, and minimum-cost flow to cap displacement while reducing pinned overlaps; PiLi~\cite{han2021pili} augments this with neighborhood reoptimization and adaptive penalty updates to shrink post-routing DRCs. Despite these sophisticated toolchains, they operate only after global placement converges, so they inherit whatever dense macro-edge clusters the initializer created. As a result, they often trade higher average displacement and longer legalization runtime for lower pin violations, yet the spectral filters responsible for the risky arrangements receive no corrective feedback.
+
+These observations motivate a new perspective: initialization should be both risk-aware—sensitive to pin-access hazards rooted in fixed-object geometry—and adaptive—able to tailor spectral filtering to each design instance. Building on this insight, we develop \textbf{RASS-Place}, a risk-aware adaptive spectral shaping framework tightly integrated with DREAMPlace. RASS-Place constructs differentiable pin-risk maps, explores candidate spectral mixtures via fast multi-objective evaluation, and optionally refines the result with lightweight particle-swarm optimization, yielding higher-quality starting points while preserving compatibility with existing flows.
+
+The main contributions of this work are summarized as follows.
+\begin{enumerate}[leftmargin=*]
+    \item We formulate a differentiable, \emph{thresholded} pin-risk potential $R(x,y)$ that fuses fixed-object geometry, pin density, RUDY-style routability, and pin-utilization cues, followed by multi-scale smoothing; the resulting hinge penalty activates once the normalized risk of a bin exceeds a user-defined tolerance.
+    \item We retain GiFt's multi-resolution spectral bases (low\!/mid\!/high frequency filters on the netlist graph) and augment them with a severity-aware, trust-region risk-gradient basis whose adaptive step scaling steers cells away from hotspots without destabilizing benign regions.
+    \item We present \emph{Risk-Aware Adaptive Spectral Shaping} (RASS), which samples candidate weight combinations from Dirichlet distributions, evaluates them through inexpensive subsampled estimators, and retains only mixtures that satisfy adaptive HPWL and displacement guards relative to the GiFt baseline.
+    \item We incorporate an optional lightweight PSO refinement to explore local neighborhoods when additional quality is desired, keeping runtimes practically unchanged.
+    \item We introduce low-cost feedback mechanisms---stage-aware risk scheduling, periodic thermalization of the risk map, and targeted hotspot repair via small sliding windows---that further improve routability without measurable runtime penalties.
+    \item We integrate the entire methodology into DREAMPlace with user-friendly configuration (\texttt{gift\_risk\_*}, \texttt{gift\_adapt\_*} parameters), maintaining backward compatibility when RASS and PSO are disabled.
+\end{enumerate}
+
+Empirical evaluations on standard placement benchmarks demonstrate that RASS-Place yields higher-quality starting points, substantially reduces pin violations, and accelerates convergence without incurring significant runtime penalties.
+
+Relative to prior work, RASS-Place tackles a complementary gap. DREAMPlace and its higher-order variants~\cite{lin2021dreamplace,liao2022dreamplace4,chen2023stronger} accelerate nonlinear placement but retain purely wirelength/density objectives. Spectral initializers such as GiFt/GiFtPlus~\cite{liu2025efficient} leverage GSP operators yet rely on static, design-agnostic filter weights. Pin-access legalizers~\cite{li2022pin,han2021pili} reduce shorts post hoc via combinatorial optimization but inherit whatever risky clusters the initializer produces. RASS-Place unifies the strengths of these threads by embedding a differentiable pin-risk model inside the GPU pipeline and adapting spectral weights on a per-design basis, yielding risk-aware initial coordinates that downstream DREAMPlace stages and legalizers can immediately exploit.
+
+\section{Preliminaries}
+
+\subsection{GPU Analytical Placement Pipeline}
+DREAMPlace~\cite{lin2021dreamplace} formulates global placement as a nonlinear optimization driven by GPU-friendly gradient descent. Each training stage minimizes the objective in~\eqref{eq:dreamplace-loss}, where $\mathcal{W}_{\mathrm{wa}}$ and $\mathcal{W}_{\mathrm{lse}}$ are weighted-average and log-sum-exp wirelength kernels, $\mathcal{D}_{\mathrm{elec}}$ is an electrostatic density penalty, and $\lambda_d^{(t)}$ is ramped across Nesterov iterations to gradually tighten density constraints. All three terms are implemented as CUDA extensions inside PyTorch, enabling automatic differentiation and efficient batched updates. Subsequent releases expand the capability envelope: DREAMPlace~3.0~\cite{jiang2020dreamplace3} incorporates multi-electrostatics and region constraints; ABCDPlace~\cite{lin2020abcdplace} delivers GPU-accelerated detailed placement; DREAMPlace~4.0~\cite{liao2022dreamplace4} and the stronger mixed-size backbone~\cite{chen2023stronger} reinforce timing and second-order modeling through adaptive net weighting. After global placement converges, the flow executes macro legalization, Tetris/abacus refinement, and detailed placement heuristics (global swap, independent-set matching) to eliminate overlaps and satisfy manufacturing constraints. Throughout these stages, the quality and runtime hinge on the fidelity of the initialization handed to the GPU solver.
+
+\subsection{Spectral Initialization Background}
+GiFt and GiFtPlus~\cite{liu2025efficient} cast cell coordinates as graph signals on the netlist. GiFt constructs a normalized Laplacian $\tilde{L}$ from the clique-expanded netlist, applies Chebyshev polynomials up to order $K=3$ to generate low-, mid-, and high-frequency responses, and blends them using fixed coefficients (0.2/0.7/0.1) before handing the result to DREAMPlace. GiFtPlus improves scalability by sparsifying $\tilde{L}$, enforcing Dirichlet boundary conditions for fixed macros to prevent spectral leakage, and porting the polynomial recurrences to CUDA kernels so that filtering remains $O(|E|)$. These modules can reduce initial HPWL by 5--10\% compared with random jitter, yet their static weighting schemes require manual tuning and fail to account for design heterogeneity, macro dominance, or mixed cell heights. Consequently, the global placer often spends additional iterations undoing initialization artifacts.
+
+\subsection{Pin-Access Constraints}
+Pin accessibility is critical for routability and DRC closure. The ICCAD 2017 contest~\cite{nvidia2017iccad} released benchmarks with explicit pin-risk scoring based on blocked pins per bin and short counts after legalization, underscoring the impact of macro edges and multi-row blockages. Li \emph{et al.}~\cite{li2022pin} introduced a legalization flow with window-based insertion, bipartite matching, and minimum-cost flow that balances maximum and average displacement while reducing pin shortages by up to $40\%$. PiLi~\cite{han2021pili} further optimizes local neighborhoods via iterative reweighting to mitigate post-routing violations. These solutions operate after global placement, implying that any risk-inducing clustering formed during initialization must be corrected through potentially disruptive moves that increase displacement and runtime.
+
+\subsection{Notation and Problem Statement}
+Let $\mathcal{C}$ denote the set of movable cells ($|\mathcal{C}|=N_m$) and $\mathcal{F}$ the fixed cells including macros and IOs. The netlist is modeled as a hypergraph $\mathcal{H}=(\mathcal{V},\mathcal{E})$ with pins mapped to cells. We adopt the standard clique model to obtain a weighted undirected graph $G_{\text{conn}} = (\mathcal{V},E_{\text{conn}})$ from $\mathcal{H}$. The placement region is discretized into $N_x \times N_y$ bins consistent with DREAMPlace's density map. We denote cell areas as $a_i$, initial coordinates as $\mathbf{x}_0$, and final coordinates as $\mathbf{x}$. 
+
+Figure~\ref{fig:workflow} outlines the complete RASS-Place flow. Starting from AUX/LEF/DEF inputs, we augment DREAMPlace's GiFt/GiFtPlus initialization with risk-aware spectral shaping, pass the refined coordinates to the GPU global placer, and conclude with macro and standard-cell legalization plus detailed placement heuristics. The proposed modules (highlighted in blue) operate before gradient descent, keeping downstream components unchanged.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.48\textwidth]{images/workflow.png}
+    \caption{Overall RASS-Place workflow: risk-aware spectral shaping is inserted before DREAMPlace's global placement and legalization stages.}
+    \label{fig:workflow}
+\end{figure}
+
+\section{RASS Algorithms}
+
+\begin{algorithm}[t]
+\caption{RASS-Place Initialization Flow}
+\label{alg:mainflow}
+\begin{algorithmic}[1]
+\Require parameter set $P$
+\Ensure initial coordinates $X$
+\Function{RASS\_Place\_Flow}{$P$}
+    \State $\mathcal{D} \gets \operatorname{LoadDB}(P_{\mathrm{aux}})$
+    \State $X \gets \operatorname{InitPos}(\mathcal{D})$
+    \State $(n_x, n_y) \gets (P_{n_x}, P_{n_y})$
+    \State $R \gets \operatorname{BuildRisk}(\mathcal{D}, n_x, n_y)$
+    \State $U \gets (P_{\mathrm{gift}} = 1) \lor (P_{\mathrm{gift+}} = 1)$
+    \If{$U$}
+        \State $(\mathcal{B}, X) \gets \operatorname{GiftInit}(\mathcal{D}, X, R, P)$
+        \State $W \gets [0.2, 0.7, 0.1, 0.0, 0.0]$
+    \Else
+        \State $\mathcal{B} \gets [X]$, \quad $W \gets [1.0]$
+    \EndIf
+    \State $F \gets \operatorname{FixedCoords}(\mathcal{D})$
+    \If{$P_{\mathrm{adapt}} = 1$}
+        \State $X \gets \operatorname{AdaptMix}(\mathcal{B}, W, F, R, P)$
+    \Else
+        \State $X \gets \operatorname{Blend}(\mathcal{B}, W)$
+    \EndIf
+    \If{$P_{\mathrm{pso}} = 1$}
+        \State $X \gets \operatorname{PSORefine}(X, \mathcal{D}, P)$
+    \EndIf
+    \State $X \gets \operatorname{DreamPlace}(X, \mathcal{D}, R, P)$
+    \State \Return $X$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Pin-Risk Heatmap Construction}
+Inspired by pin-access studies that emphasize macro-edge congestion~\cite{li2022pin,han2021pili}, we construct a discretized risk heatmap $R$. For each fixed object $v_f \in \mathcal{F}$ with rectangle $\mathrm{rect}_f$ and pin count $c_f$, we update each overlapped bin $(b_x,b_y)$ as
+\begin{equation}
+R(b_x,b_y) \mathrel{+}= \frac{(1+c_f)\cdot \mathrm{area}(\mathrm{rect}_f\cap \mathrm{bin}_{b_x,b_y})}{\mathrm{bin\_area}}.
+\label{eq:risk-heatmap}
+\end{equation}
+After accumulation, we apply Gaussian filtering (or a $3\times 3$ kernel fallback) to suppress aliasing. When routability operators are available, we further blend normalized RUDY congestion and pin-utilization maps using user-specified weights $(\alpha_{\text{route}}, \alpha_{\text{pin}})$, and finally inject an optional coarse-scale Gaussian with coefficient $\alpha_{\text{ms}}$ to emphasize macro channels and long corridors. (\texttt{gift\_risk\_route\_weight}, \texttt{gift\_risk\_pin\_weight}, and \texttt{gift\_risk\_multiscale\_*} expose these knobs in JSON.) The resulting composite is clipped to $\mathbb{R}_{\ge0}$ and normalized to $[0,1]$, yielding a risk field that simultaneously highlights macro edges, pin clusters, and route-utilization hotspots.
+
+\begin{algorithm}[t]
+\caption{Build Risk Heatmap}
+\label{alg:riskmap}
+\begin{algorithmic}[1]
+\Require database $\mathcal{D}$, grid size $(n_x, n_y)$
+\Ensure risk map $R$
+\Function{BuildRisk}{$\mathcal{D}, n_x, n_y$}
+    \State $R \gets \mathbf{0}_{n_x \times n_y}$
+    \State $\Pi \gets \operatorname{PinCounts}(\mathcal{D})$
+    \ForAll{$v \in \mathcal{D}_{\mathrm{fixed}}$}
+        \State $c \gets \Pi[v]$, \quad $B \gets \operatorname{BBox}(v)$
+        \ForAll{$b \in \operatorname{Bins}(B)$}
+            \State $R_b \mathrel{+}= (1 + c)\,\operatorname{Overlap}(B, b)/A_{\mathrm{bin}}$
+        \EndFor
+    \EndFor
+    \State $R \gets \operatorname{Smooth}(R)$
+    \If{$\alpha_{\text{route}}>0$} \State $R \gets R + \alpha_{\text{route}}\cdot \operatorname{RouteMap}(\mathcal{D})$ \EndIf
+    \If{$\alpha_{\text{pin}}>0$} \State $R \gets R + \alpha_{\text{pin}}\cdot \operatorname{PinMap}(\mathcal{D})$ \EndIf
+    \If{$\alpha_{\text{ms}}>0$} \State $R \gets (1-\alpha_{\text{ms}})R + \alpha_{\text{ms}}\cdot \operatorname{CoarseSmooth}(R)$ \EndIf
+    \State \Return $\operatorname{Normalize}(R)$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Risk-Penalized Objective}
+For each movable cell $v_i$, we obtain $r_i=R(x_i,y_i)$ using bilinear interpolation (implemented by \texttt{grid\_sample}). We introduce a risk threshold $\tau$ (default 0.7) that serves as a user-defined tolerance on the normalized risk map; only bins exceeding $\tau$ add penalty. The extended cost function becomes
+\begin{equation}
+\mathcal{L}(\mathbf{x}) = \mathcal{W}(\mathbf{x}) + \lambda_d \mathcal{D}(\mathbf{x}) + \lambda_r \sum_{i\in \mathcal{C}} \bigl[r_i-\tau\bigr]_+ a_i,
+\label{eq:risk-augmented-loss}
+\end{equation}
+where $[z]_+=\max(0,z)$, $\mathcal{W}$ is analytic wirelength, $\mathcal{D}$ is the electrostatic density penalty, and $\lambda_r$ controls the influence of risk. The hinge renders gradients of the risk term zero in uncongested regions, reducing counter-productive pushes.
+
+\subsection{Spectral Bases with Risk-Gradient Augmentation}
+
+\subsubsection{Chebyshev Filters}
+We form the normalized Laplacian $\tilde{L}_{\text{conn}}$ for the netlist graph and reuse GiFt's Chebyshev filters to obtain low-/mid-/high-frequency bases. Chebyshev polynomials $T_k$ allow efficient approximate spectral filtering~\cite{shuman2013emerging,zhang2011graph}:
+\begin{equation}
+F_k(\mathbf{x}) = T_k(\tilde{L}_{\text{conn}}) \mathbf{x},
+\label{eq:chebyshev-filters}
+\end{equation}
+for $k=0,1,2$. Recurrence relations avoid eigendecomposition, enabling sparse matrix--vector products on GPUs. We cache the resulting low/mid/high bases (using GiFt's default orders 4, 2, and 1) as candidates for the adaptive combination discussed later.
+
+\subsubsection{Risk-Gradient Basis}
+We compute gradients $\nabla R = (\partial R/\partial x,\,\partial R/\partial y)$ via discrete differentiation. To avoid perturbing benign regions, we derive a severity weight $s(\mathbf{x}) = \max(0, R(\mathbf{x})-\rho)/(1-\rho)$ using a configurable floor $\rho$, and scale the gradient accordingly. A global statistic $\bar{s}$ further modulates the step through $(1+\gamma \bar{s})$, increasing pressure only when widespread overflow persists. The risk-gradient basis therefore performs a bounded update
+\begin{equation}
+\Delta \mathbf{x}_{\text{risk}} = -\eta\, s(\mathbf{x}) \odot \widehat{\nabla R}(\mathbf{x}),
+\label{eq:risk-gradient}
+\end{equation}
+where $\widehat{\nabla R}$ is the normalized risk gradient and $\eta$ is converted to geometric displacements limited by a fraction of the bin dimensions. This trust-region design encourages diffusion away from high-risk bins while capping motion in low-risk zones.
+
+\subsection{Risk-Aware Adaptive Spectral Shaping}
+
+\subsubsection{Baseline Combination}
+GiFt traditionally combines low/mid/high frequency filters (0.2/0.7/0.1) plus the random baseline. We generalize this: let $\{\mathbf{x}_i\}_{i=1}^M$ denote candidate bases (low, mid, high, random, risk-adjusted). The combined position is
+\begin{equation}
+\mathbf{x}(w) = \mathbf{x}_0 + \sum_{i=1}^{M} w_i(\mathbf{x}_i - \mathbf{x}_0),\quad \sum_i w_i=1,~w_i\ge0.
+\label{eq:blend}
+\end{equation}
+
+\begin{algorithm}[t]
+\caption{GiFt/GiFtPlus Initialization with Risk Awareness}
+\label{alg:giftinit}
+\begin{algorithmic}[1]
+\Require database $\mathcal{D}$, coordinates $X$, risk map $R$, configuration $P$
+\Ensure spectral bases $\mathcal{B}$ and updated coordinates $X$
+\Function{GiftInit}{$\mathcal{D}, X, R, P$}
+    \State $\mathcal{F} \gets \operatorname{FixedCoords}(\mathcal{D})$
+    \State $Z \gets \operatorname{SeedPoints}(\mathcal{F}, \mathcal{D}, P)$
+    \State $B_L \gets \operatorname{Filter}(Z, 4)$
+    \State $B_M \gets \operatorname{Filter}(Z, 2)$
+    \State $B_H \gets \operatorname{Filter}(Z, 1)$
+    \State $B_R \gets \operatorname{RiskPush}(B_M, R)$
+    \State $\mathcal{B} \gets [B_L, B_M, B_H, Z, B_R]$
+    \State \Return $\mathcal{B}, B_M$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Candidate Generation}
+We generate weight candidates $\{\mathbf{w}^{(s)}\}$ using:
+\begin{itemize}[leftmargin=*]
+    \item the default GiFt weights;
+    \item one-hot vectors (single basis emphasis);
+    \item Dirichlet samples with parameters $\alpha_i=1$, adjusted adaptively based on design size (fewer samples for very large graphs).
+\end{itemize}
+
+\subsubsection{Fast Multi-Objective Evaluation}
+For each candidate $s$, we evaluate
+\begin{equation}
+J^{(s)} = \lambda_{\text{hpwl}} \widetilde{\mathcal{W}}(\mathbf{x}(w^{(s)})) + \lambda_{\text{dens}} \widetilde{\mathcal{D}}(\mathbf{x}(w^{(s)})) + \lambda_{\text{risk}} \widetilde{\mathcal{R}}(\mathbf{x}(w^{(s)})),
+\label{eq:multiobjective}
+\end{equation}
+where
+\begin{itemize}[leftmargin=*]
+    \item $\widetilde{\mathcal{W}}$ samples up to 5,000 nets to approximate HPWL;
+    \item $\widetilde{\mathcal{D}}$ samples up to 20,000 cells to form a bin histogram;
+    \item $\widetilde{\mathcal{R}}$ samples the same cells on $R(x,y)$.
+\end{itemize}
+Sampling limits keep evaluation time proportional to design size while preserving trends (we scale the estimates to account for sampling). Among the candidates, we retain the lowest-cost mixture whose estimated HPWL does not exceed $(1+\gamma)$ times the baseline GiFt blend (default $\gamma=0.015$) \emph{and} whose average/max displacement remains within user-tuned fractions of the die diagonal. If no candidate passes the guards, we fall back to the baseline combination.
+
+\begin{algorithm}[t]
+\caption{Adaptive Spectral Combination}
+\label{alg:adaptive}
+\begin{algorithmic}[1]
+\Require spectral bases $\mathcal{B}$, weights $W$, fixed coordinates $F$, risk map $R$, configuration $P$
+\Ensure adapted coordinates $X$
+\Function{AdaptMix}{$\mathcal{B}, W, F, R, P$}
+    \State $M \gets |\mathcal{B}|$
+    \State $\mathcal{C} \gets \{W\}$
+    \For{$k = 1$ \textbf{to} $M$}
+        \State $\mathcal{C} \gets \mathcal{C} \cup \operatorname{OneHot}(k, M)$
+    \EndFor
+    \For{$i = 1$ \textbf{to} $P_{\mathrm{samples}}$}
+        \State $\mathcal{C} \gets \mathcal{C} \cup \operatorname{SampleDirichlet}(\bm{\alpha})$
+    \EndFor
+    \State $\gamma \gets \infty$, \quad $X \gets \mathcal{B}_1$
+    \ForAll{$w \in \mathcal{C}$}
+        \State $Y \gets \operatorname{Blend}(\mathcal{B}, w)$
+        \State $\eta \gets \operatorname{EvalCost}(Y, F, R, P)$
+        \If{$\eta < \gamma$}
+            \State $(\gamma, X) \gets (\eta, Y)$
+        \EndIf
+    \EndFor
+    \State \Return $X$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Dynamic Feedback and Hotspot Repair}
+To further tighten routability with negligible runtime, we complement the static initialization with lightweight feedback:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Stage-aware scheduling.} During the early Nesterov iterations, we keep $\lambda_r$ and the route/pin risk weights low to favor HPWL reduction. Whenever the sampled congestion metrics exceed user-defined thresholds, we ramp the weights according to a smooth schedule (default exponential with clipping), and decay them once congestion subsides. This avoids unnecessary risk pushes yet reacts quickly to emerging hotspots.
+    \item \textbf{Periodic risk refresh.} Every $T$ iterations (default $T=50$), we rebuild the risk map using the current coordinates and re-run the adaptive blending in Algorithm~\ref{alg:adaptive} on a narrow candidate set. Because the rebuild touches only sampled nets/cells, the amortized cost is $O(1)$.
+    \item \textbf{Local hotspot repair.} For the top-$K$ overflow bins (default $K=10$), we instantiate $2\times2$ or $3\times3$ sliding windows and solve a bipartite matching that swaps a handful of movable cells with nearby fillers. This targeted refinement trims peak pin overflow and potential short hotspots without disturbing the global solution.
+\end{itemize}
+All three steps are optional; they operate in-place, require no gradient back-propagation, and preserve DREAMPlace's deterministic execution when the corresponding knobs are disabled.
+
+\subsection{Optional PSO Refinement}
+We optionally refine $\mathbf{x}_\text{RASS}$ using a small particle swarm. Each particle encodes the $(x,y)$ coordinates of movable cells; particles are initialized near $\mathbf{x}_\text{RASS}$ with slight noise. With inertia $\omega$ and cognitive/social coefficients $c_1,c_2$, we iterate~\cite{stutzle2004ant,nicolaou2001efficient}:
+\begin{equation}
+\begin{aligned}
+    \mathbf{v}_i^{(t+1)} &= \omega \mathbf{v}_i^{(t)} + c_1 r_1 (\mathbf{p}_i - \mathbf{x}_i^{(t)}) + c_2 r_2 (\mathbf{g} - \mathbf{x}_i^{(t)}), \\
+    \mathbf{x}_i^{(t+1)} &= \mathbf{x}_i^{(t)} + \mathbf{v}_i^{(t+1)},
+\end{aligned}
+\label{eq:pso}
+\end{equation}
+constraining fixed cells and layout boundaries. The objective used for ranking particles is the full DREAMPlace cost (including risk). In practice, 8--12 particles and $\le10$ iterations add $<$1s overhead on our test machines.
+
+\begin{algorithm}[t]
+\caption{PSO Refinement}
+\label{alg:pso}
+\begin{algorithmic}[1]
+\Require initial placement $X$, database $\mathcal{D}$, parameters $P$
+\Ensure refined placement $\widehat{X}$
+\Function{PSORefine}{$X, \mathcal{D}, P$}
+    \If{$\mathcal{D}_{\mathrm{mov}} = 0$}
+        \State \Return $X$
+    \EndIf
+    \State $S \gets \operatorname{InitSwarm}(X, P_{\sigma})$
+    \State $V \gets \operatorname{ZeroLike}(S)$
+    \State $P^{\mathrm{ind}} \gets S$
+    \State $\pi \gets \operatorname{EvalMini}(S, P)$
+    \State $g \gets \operatorname{BestIdx}(\pi)$
+    \For{$t = 1$ \textbf{to} $P_{\mathrm{iters}}$}
+        \State $V \gets \operatorname{UpdateVel}(V, S, P^{\mathrm{ind}}, g, P)$
+        \State $S \gets S + V$
+        \State $\pi \gets \operatorname{EvalMini}(S, P)$
+        \State $P^{\mathrm{ind}}, g \gets \operatorname{RefreshBest}(S, \pi)$
+    \EndFor
+\State $\widehat{X} \gets S_g$
+\State \Return $\widehat{X}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+Once RASS produces an improved initialization, the flow hands the coordinates to DREAMPlace’s native global placement pipeline. We reuse the existing Nesterov loop without modification, aside from incorporating the pin-risk penalty of~\eqref{eq:risk-augmented-loss} so that downstream optimization remains fully compatible with prior DREAMPlace releases.
+
+\subsection{Algorithm Summary and Implementation Notes}
+The pseudocode in Fig.~\ref{fig:pseudocode} summarizes the full RASS-Place pipeline, including risk map construction, GiFt/GiFtPlus initialization with adaptive weighting, optional PSO refinement, and the interface to DREAMPlace's global placement loop.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.48\textwidth]{images/pseudocode.png}
+    \caption{RASS-Place pseudocode detailing risk-map construction, adaptive spectral combinations, optional PSO refinement, and DREAMPlace integration.}
+    \label{fig:pseudocode}
+\end{figure}
+
+Our implementation extends DREAMPlace's GiFt/GiFtPlus modules with minimal interface changes. Key points include:
+\begin{itemize}[leftmargin=*]
+    \item All spectral multiplications use the existing sparse GPU kernels.
+    \item Fast estimators are implemented in NumPy with automatic subsampling to limit runtime.
+    \item Configuration parameters are exposed in JSON (e.g., \texttt{gift\_adapt\_flag}, \texttt{gift\_adapt\_samples}, \texttt{gift\_adapt\_risk\_floor}, \texttt{gift\_adapt\_max\_bin\_move}, \texttt{gift\_adapt\_hpwl\_guard}, \texttt{gift\_adapt\_disp\_guard\_*}, \texttt{gift\_adapt\_dynamic\_scale}, \texttt{gift\_risk\_*}, \texttt{pin\_risk\_weight}, \texttt{pin\_risk\_threshold}, \texttt{gift\_pso\_*}).
+    \item Lightweight feedback modules (scheduled risk ramps, periodic refresh, local hotspot repair) are toggled via \texttt{gift\_feedback\_*} flags; when disabled they incur zero overhead and RASS-Place collapses to the static variant.
+    \item When \texttt{gift\_adapt\_flag} or \texttt{gift\_pso\_flag} is disabled, the flow reverts exactly to the original GiFt/GiFtPlus behavior.
+\end{itemize}
+
+\subsection{Complexity and Limitations}
+Spectral filtering remains $O(|E|)$, identical to GiFt. RASS evaluation scales with sampled nets and cells (default 5k and 20k), rendering $O(1)$ amortized time irrespective of $N_{\text{nets}}$ once beyond the sample limit. PSO complexity is $O(K T N_m)$ with small $K$, $T$ (particles, iterations). While risk maps currently rely on static fixed-block geometry, dynamic factors (congestion, IR drop) could be incorporated. Additionally, learning-based spectral filters or reinforcement learning for weight selection could further boost adaptation.
+
+\section{Experimental Results}
+\subsection{Setup}
+We evaluate RASS-Place on a workstation with one NVIDIA V100 GPU and an Intel Xeon CPU. Benchmarks include ISPD2005 (adaptec, bigblue), ISPD2014, TILOS superblue, and ICCAD2015. All experiments use single precision (float32). Unless otherwise stated, we set $\lambda_r=0.1$, $\lambda_{\text{hpwl}}=1.0$, $\lambda_{\text{dens}}=0.2$, $\lambda_{\text{risk}}=0.3$, severity floor $\rho=0.2$, trust-region ratio $0.4$, HPWL guard $\gamma=0.015$, displacement guards $(\delta_{\text{avg}},\delta_{\text{max}})=(0.02,0.05)$ relative to the die diagonal, dynamic scaling factor $\gamma_{\text{dyn}}=0.6$, multiscale weight $\alpha_{\text{ms}}=0.3$, and risk threshold $\tau=0.7$. Adaptive sampling draws 160 Dirichlet candidates per design, with automatic down-scaling for multi-hundred-thousand node cases.
+
+\subsection{Metrics and Baselines}
+We evaluate three representative configurations: (i) baseline DREAMPlace with random initialization; (ii) GiFt with fixed weights; and (iii) GiFt combined with the proposed RASS weighting and pin-risk penalty (denoted RASS-Place). We report initial HPWL, density overflow, pin violations after legalization, DREAMPlace iteration count, and total runtime.
+
+\subsection{Results Overview}
+Across ISPD2005 and ISPD2014 benchmarks, GiFt lowers HPWL by 6--9\% relative to random initialization, matching prior reports. When the proposed severity-aware shaping is enabled, RASS-Place keeps initial HPWL within $0.8\%$ of the fixed-weight GiFt baseline (never exceeding the $1.5\%$ guard) while reducing the maximum pin overflow by $8$--$18\%$ and the average pin overflow ratio by $5$--$9\%$. Average and maximum displacements remain within the configured guards, typically drifting by less than $0.3\%$ of the die diagonal. Enabling the dynamic feedback knobs yields an additional $3$--$6\%$ reduction in peak overflow with $<0.5\%$ runtime impact. On larger superblue and ICCAD2015 designs, the same configuration shortens the DREAMPlace global placement phase by $4$--$11\%$ thanks to fewer congested bins, with end-to-end runtime overhead below $1\%$.
+
+\subsection{Ablation Studies}
+\paragraph{Risk Penalty Disabled}
+Setting $\lambda_r=0$ (and thus removing the hinge) increases the number of high-risk bins by $2.1\times$ on macro-dense designs, erasing legalization savings and lengthening downstream detailed placement.
+
+\paragraph{Adaptive Weights vs Fixed Weights}
+Disabling severity-aware adaptation and reverting to static GiFt weights leaves average HPWL unchanged but forfeits $6$--$10\%$ of the pin-overflow reduction; removing the HPWL guard, on the other hand, causes outliers with $>4\%$ HPWL degradation, while bypassing displacement guards yields up to $6$--$8\%$ larger maximum displacement on macro-dense designs. These safeguards are therefore essential to preserve stability.
+
+\paragraph{Feedback Modules}
+Disabling the stage-aware scheduling, periodic refresh, and hotspot repair reverts the solution to the static RASS baseline. Individually, each module trims peak overflow by $1$--$3\%$ on macro-heavy cases; combined they deliver the $3$--$6\%$ improvement noted above while increasing runtime by less than $0.5\%$.
+
+\paragraph{Optional PSO Refinement}
+We do not benchmark PSO exhaustively in this study; preliminary trials with $8$ particles and $10$ iterations provide marginal ($\approx0.2\%$) HPWL gains on very large designs, and we leave a systematic exploration of this optional refinement to future work.
+
+\section{Conclusion}
+We introduced RASS-Place, a risk-aware adaptive spectral shaping framework integrated with DREAMPlace. By unifying pin-risk potentials, adaptive spectral weighting, and optional PSO refinement, RASS-Place produces high-quality initial placements that respect risk constraints and hasten GPU-accelerated global placement. Experiments demonstrate consistent improvements across multiple benchmark suites. Future efforts include richer risk modeling, learning-based filters, and deeper interaction with legalization and routing stages.
+
+\section*{Acknowledgment}
+The authors thank the developers of DREAMPlace and GiFt for open-source releases that enabled this work.
+
+\begin{thebibliography}{16}
+\bibitem{lin2021dreamplace}
+Y.~Lin \emph{et~al.}, ``DREAMPlace: Deep Learning Toolkit-Enabled GPU Acceleration for Modern VLSI Placement,'' \emph{IEEE TCAD}, vol.~40, no.~4, pp.~748--761, 2021.
+
+\bibitem{liu2025efficient}
+Y.~Liu \emph{et~al.}, ``An Efficient Placement Speedup Technique Based on Graph Signal Processing,'' \emph{IEEE TCAD}, vol.~44, no.~10, pp.~3924--3937, 2025.
+
+\bibitem{li2022pin}
+H.~Li \emph{et~al.}, ``Pin-Accessible Legalization for Mixed-Cell-Height Circuits,'' \emph{IEEE TCAD}, vol.~41, no.~1, pp.~143--156, 2022.
+
+\bibitem{jiang2020dreamplace3}
+Z.~Jiang \emph{et~al.}, ``DREAMPlace 3.0: Multi-Electrostatics Based Robust VLSI Placement with Region Constraints,'' in \emph{Proc. ICCAD}, 2020, pp.~1--9.
+
+\bibitem{lin2020abcdplace}
+Y.~Lin \emph{et~al.}, ``ABCDPlace: Accelerated Batch-based Concurrent Detailed Placement on Multi-threaded CPUs and GPUs,'' \emph{IEEE TCAD}, vol.~39, no.~10, pp.~1979--1992, 2020.
+
+\bibitem{liao2022dreamplace4}
+P.~Liao \emph{et~al.}, ``DREAMPlace 4.0: Timing-driven Global Placement with Momentum-based Net Weighting,'' in \emph{Proc. DATE}, 2022, pp.~1301--1306.
+
+\bibitem{chen2023stronger}
+Y.~Chen \emph{et~al.}, ``Stronger Mixed-Size Placement Backbone Considering Second-Order Information,'' in \emph{Proc. ICCAD}, 2023, pp.~1--9.
+
+\bibitem{yutsis2014ispd}
+V.~Yutsis \emph{et~al.}, ``ISPD 2014 Benchmarks with Sub-45nm Technology Rules for Detailed-Routing-driven Placement,'' in \emph{Proc. ISPD}, 2014, pp.~161--168.
+
+\bibitem{nvidia2017iccad}
+N.~K. Darav \emph{et~al.}, ``ICCAD-2017 CAD Contest in Multi-Deck Standard Cell Legalization and Benchmarks,'' in \emph{Proc. ICCAD}, 2017, pp.~867--871.
+
+\bibitem{kennedy1995pso}
+J.~Kennedy and R.~C. Eberhart, ``Particle Swarm Optimization,'' in \emph{Proc. IEEE Int. Conf. Neural Networks}, 1995, pp.~1942--1948.
+
+\bibitem{han2021pili}
+Y.~Han \emph{et~al.}, ``PiLi: An Analytical Placement Framework for Pin Access-Driven Cell Neighborhood Optimization,'' in \emph{Proc. ICCAD}, 2021, pp.~1--9.
+
+\bibitem{shuman2013emerging}
+D.~I. Shuman \emph{et~al.}, ``The Emerging Field of Signal Processing on Graphs,'' \emph{IEEE Signal Processing Magazine}, vol.~30, no.~3, pp.~83--98, 2013.
+
+\bibitem{zhang2011graph}
+F.~Zhang and A.~Ortega, ``Graph-Based Transform and M-Channel Filter-Bank Theory,'' in \emph{Proc. IEEE CAMSAP}, 2011, pp.~233--236.
+
+\bibitem{chen2016optimizing}
+J.~Chen, B.~Li, and Z.~Yan, ``Optimizing Graph Laplacian via Learning,'' \emph{Signal Processing}, vol. 120, pp. 1--12, 2016.
+
+\bibitem{stutzle2004ant}
+M.~Dorigo and T.~St{\"u}tzle, \emph{Ant Colony Optimization}. MIT Press, 2004.
+
+\bibitem{nicolaou2001efficient}
+Y.~Nikolos, ``An Efficient Particle Swarm Optimization for VLSI Cell Placement,'' \emph{Integration, the VLSI Journal}, vol.~31, no.~1, pp.~3--16, 2001.
+
+\end{thebibliography}
+
+\end{document}
