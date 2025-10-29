@@ -389,6 +389,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     cur_metric.density_weight = model.density_weight.data
                     metrics.append(cur_metric)
                     pos = model.data_collections.pos[0]
+                    if params.rass_place_flag and params.rass_refresh_interval > 0:#主迭代中被调用：先刷新风险，再依据 route/pin 指标调权重并修热点
+                        model.refresh_rass_state(params, placedb, iteration)
 
                     # move any out-of-bound cell back to placement region
                     self.op_collections.move_boundary_op(pos)
@@ -417,6 +419,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     model.overflow = cur_metric.overflow.data.clone()
                     # logging.debug("evaluation %.3f ms" % ((time.time()-t1)*1000))
                     # t2 = time.time()
+
+                    route_metrics = None
+                    pin_metrics = None
+                    if params.rass_place_flag and params.rass_feedback_flag:
+                        pos_detached = pos.detach()
+                        pin_metrics = self._compute_pin_metrics(params, placedb, pos_detached)#调用入口
+                        route_metrics = self._compute_route_metrics(params, placedb, pos_detached)
+                        model.schedule_rass_weights(params, iteration, route_metrics, pin_metrics)
+                        model.repair_rass_hotspots(params, placedb, pos, route_metrics, pin_metrics)
 
                     # as nesterov requires line search, we cannot follow the convention of other solvers
                     if optimizer_name.lower() in optimizers_list:

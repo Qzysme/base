@@ -97,13 +97,16 @@ class GiFtInit(nn.Module):
 
         logger.info('Done matrix construction')
 
-    def forward(self, pos):
-        with torch.no_grad():
+    def forward(self, pos):#forward 先生成低/中/高频 Chebyshev 基底以及随机基底，然后融合成最终初始位置
+        with torch.no_grad():# 初始化阶段不需要反向传播，加速并节省显存
             pos_device = pos.device
             dtype = pos.dtype
 
             pos_t = pos.view([2, -1]).t().cpu().numpy()
+            # 将输入坐标 pos 变形为 [2, N] -> 转置为 [N, 2]（每行一个节点的 (x,y)）
+        # 再拷到 CPU，转为 numpy，方便配合 numpy/自定义函数生成随机初始
             fixed_cell_location = pos_t[self.num_movable_nodes:self.num_movable_nodes + self.num_fixed_nodes]
+            # 取出固定单元（宏/IO）的坐标切片，形状 [num_fixed, 2]
             random_initial = util.generate_initial_locations(
                 fixed_cell_location,
                 self.num_movable_nodes,
@@ -113,39 +116,58 @@ class GiFtInit(nn.Module):
                 self.yh,
                 self.scale,
             )
+            # 为“可移动单元”生成随机初始位置（考虑版图边界 xl/yl/xh/yh，可能带 scale 抖动/边距）
+            
             random_initial = np.concatenate((random_initial, fixed_cell_location), 0)
+            # 把“随机生成的可移动部分”和“固定单元的原位置”拼接起来，形成完整的 [N, 2] 初始坐标
             random_initial = torch.from_numpy(random_initial).to(pos_device, dtype=dtype)
-
+            # 再转回 torch 张量，放回原 device / dtype，作为基底之一（随机基底）
             start = time.time()
             low_pass_filter = mix_frequency_filter.GiFt_GPU(self.adj_mat, pos.device)
+            # 构建 GiFt 的 GPU 频谱滤波器，基于 netlist 的邻接矩阵 self.adj_mat
+            # 用 Chebyshev 多项式近似图 Laplacian 的滤波操作（不显式特征分解）
             low_pass_filter.train(4)
             location_low = low_pass_filter.get_cell_position(4, random_initial)
+            # “低频基底”：用阶数 4 的 Chebyshev 低通滤波对随机初始进行平滑，得到较平滑/全局一致的坐标
 
             low_pass_filter.train(4)
             location_mid = low_pass_filter.get_cell_position(2, random_initial)
-
+            # “中频基底”：这里再次设置/复用滤波器，然后用阶数 2 获取中频响应（强调中尺度结构）
             low_pass_filter.train(2)
             location_high = low_pass_filter.get_cell_position(2, random_initial)
             logger.info('GiFt filtering took %g sec', time.time() - start)
-
+            # “高频基底”：再次配置后取阶数 2 的结果，作为高频（更强调局部变化）
+            #当前与中频同为 2 阶，这个原本gift就是这么设置的
+            # 记录三路频谱滤波的耗时
             bases = [location_low, location_mid, location_high, random_initial]
-            baseline_weights = torch.tensor([0.2, 0.7, 0.1, 0.0], device=pos_device, dtype=dtype)
+            # 基底集合：低频/中频/高频/随机（形状均为 [N, 2]）
 
+            baseline_weights = torch.tensor([0.2, 0.7, 0.1, 0.0], device=pos_device, dtype=dtype)
+            # GiFt 经典固定配比：低/中/高/随机 = 0.2 / 0.7 / 0.1 / 0.0
+            # 作为初始/基线权重（若不开启 RASS，自此直接用该配比融合）
             if self.rass_enabled:
-                risk_basis = self._risk_push_basis(location_mid)
+                risk_basis = self._risk_push_basis(location_mid)#135–142 行追加 _risk_push_basis 得到风险梯度基
+                # 基于“中频基底”再做一次“风险驱动推离”生成的风险基底（把细胞从高风险区往外推，带信任域/强度控制）
                 bases.append(risk_basis)
+                # 现在基底包含：低/中/高/随机/风险，共 5 路
+
                 baseline_weights = torch.cat(
                     [baseline_weights, torch.zeros(1, device=pos_device, dtype=dtype)], dim=0
                 )
+                # 给风险基底的初始权重设为 0（与论文一致：在自适应搜索前，基线不强制引入风险项）
                 blended, _ = self._select_rass_weights(bases, baseline_weights)
+                # 自适应权重选择：采样 Dirichlet 候选、快速评估（HPWL/密度/风险）、加“护栏”（HPWL/位移阈）
+                # 选出满足护栏的最优组合，得到最终融合坐标 blended（形状 [N, 2]）
             else:
                 blended = self._blend_bases(bases, baseline_weights)
+                # 未启用 RASS：直接用固定配比 0.2/0.7/0.1/0.0 融合四路基底
 
             if self.num_fixed_nodes > 0:
                 fixed_tensor = torch.from_numpy(fixed_cell_location).to(pos_device, dtype=dtype)
                 blended[self.num_movable_nodes : self.num_movable_nodes + self.num_fixed_nodes] = fixed_tensor
-
+                # 将固定单元的坐标“回填”到融合结果中，确保固定单元位置不被改变
             return blended.t()
+            # 返回前转置回 [2, N]（与输入 pos 的形状一致），作为初始化坐标
 
     def _setup_rass(self):
         risk_map = self.rass["risk_map"].detach()
@@ -175,105 +197,105 @@ class GiFtInit(nn.Module):
         stacked = torch.stack(bases, dim=0)
         weights = weights.view(-1, 1, 1)
         return torch.sum(stacked * weights, dim=0)
-
-    def _select_rass_weights(self, bases, baseline_weights):
-        device = bases[0].device
+    #自适应谱混合（Dirichlet 采样 + 守卫）
+    def _select_rass_weights(self, bases, baseline_weights):# _select_rass_weights、_evaluate_candidate、_passes_guards、_score_candidate .对每个候选估计采样 HPWL、平均风险、平均/最大位移，并用守卫判定是否接受
+        device = bases[0].device                            #得分函数更偏向小 HPWL、低风险的组合，挑出最优权重
         dtype = bases[0].dtype
         num_bases = len(bases)
         base_w = baseline_weights
         if base_w.numel() < num_bases:
             pad = torch.zeros(num_bases - base_w.numel(), device=device, dtype=dtype)
             base_w = torch.cat([base_w, pad], dim=0)
-        weights_candidates = [base_w]
+        weights_candidates = [base_w] # 候选权重列表，先放入基线权重
 
-        if not self.rass.get("adapt_flag", True):
+        if not self.rass.get("adapt_flag", True):# 未启用自适应探索：仅构造一个“强调风险基”的候选
             risk_focus = base_w.clone()
             if num_bases > 4:
-                emphasis = 0.3
+                emphasis = 0.3 # 给风险基分配 0.3 权重
                 risk_focus[-1] = emphasis
                 remaining = max(1.0 - emphasis, 1e-6)
-                core = base_w[:-1]
+                core = base_w[:-1]# 其它基底的基线配比
                 core_sum = core.sum().item()
                 if core_sum > 0:
                     risk_focus[:-1] = core * (remaining / core_sum)
                 else:
                     risk_focus[:-1] = remaining / (num_bases - 1)
             weights_candidates.append(risk_focus)
-        else:
+        else:# 启用自适应探索：更全面地构造候选
             for i in range(num_bases):
                 one_hot = torch.zeros(num_bases, device=device, dtype=dtype)
                 one_hot[i] = 1.0
-                weights_candidates.append(one_hot)
+                weights_candidates.append(one_hot)# 逐一加入“单一基底”的 one-hot 候选（强调每个基底）
             alpha = np.ones(num_bases)
             for _ in range(self.rass.get("num_samples", 0)):
                 sample = torch.from_numpy(np.random.dirichlet(alpha)).to(device=device, dtype=dtype)
-                weights_candidates.append(sample)
+                weights_candidates.append(sample) # 再从 Dirichlet 分布采样若干组权重
 
-        baseline_loc = self._blend_bases(bases, base_w)
-        baseline_hpwl, baseline_risk, _, _ = self._evaluate_candidate(baseline_loc, baseline_loc)
-        best_weights = base_w
+        baseline_loc = self._blend_bases(bases, base_w)# 用基线权重融合出“基线位置”，作为比较参照
+        baseline_hpwl, baseline_risk, _, _ = self._evaluate_candidate(baseline_loc, baseline_loc) # 评估基线：得到基线 HPWL 与基线风险
+        best_weights = base_w# 当前最优候选 = 基线
         best_loc = baseline_loc
-        best_score = float("inf")
+        best_score = float("inf") # 最优分数初始化为 +∞
 
         for weights in weights_candidates:
-            loc = self._blend_bases(bases, weights)
-            hpwl, risk, avg_disp, max_disp = self._evaluate_candidate(loc, baseline_loc)
-            if not self._passes_guards(hpwl, baseline_hpwl, avg_disp, max_disp):
+            loc = self._blend_bases(bases, weights) # 用候选权重融合出候选位置
+            hpwl, risk, avg_disp, max_disp = self._evaluate_candidate(loc, baseline_loc)# 评估候选：返回 HPWL、平均风险、平均/最大位移
+            if not self._passes_guards(hpwl, baseline_hpwl, avg_disp, max_disp):# 守卫判定：若 HPWL 超过基线允许比例或位移超过阈值，直接淘汰
                 continue
-            score = self._score_candidate(hpwl, baseline_hpwl, risk, baseline_risk)
+            score = self._score_candidate(hpwl, baseline_hpwl, risk, baseline_risk)# 偏向 HPWL 更小、风险更低的候选（具体权衡在 _score_candidate 里）
             if score < best_score:
                 best_score = score
                 best_weights = weights
-                best_loc = loc
+                best_loc = loc# 记录更优的候选
 
         if best_score == float("inf"):
-            return baseline_loc, base_w
+            return baseline_loc, base_w# 若无任何候选通过守卫，则回退到基线
 
-        return best_loc, best_weights
+        return best_loc, best_weights # 返回最终选中的融合位置与对应权重
 
     def _evaluate_candidate(self, loc, baseline_loc):
-        hpwl = self._approx_hpwl(loc)
-        risk = self._avg_risk(loc)
+        hpwl = self._approx_hpwl(loc)# 估计该候选位置 loc 的 HPWL（通常是采样/近似计算的 HPWL，用来衡量线长好坏）
+        risk = self._avg_risk(loc)# 估计该候选位置 loc 的平均风险值
         disp = torch.norm(loc - baseline_loc, dim=1)
         avg_disp = disp.mean().item()
         max_disp = disp.max().item()
         return hpwl, risk, avg_disp, max_disp
 
-    def _passes_guards(self, hpwl, baseline_hpwl, avg_disp, max_disp):
-        diag = self.rass["layout_diag"]
-        hpwl_guard = self.rass["hpwl_guard"]
-        avg_guard = diag * self.rass["disp_avg_guard"]
-        max_guard = diag * self.rass["disp_max_guard"]
-        hpwl_ok = baseline_hpwl <= 0 or hpwl <= baseline_hpwl * (1.0 + hpwl_guard + 1e-9)
-        return hpwl_ok and avg_disp <= avg_guard and max_disp <= max_guard
+    def _passes_guards(self, hpwl, baseline_hpwl, avg_disp, max_disp):#筛掉不稳定的候选初始化
+        diag = self.rass["layout_diag"]# 版图对角线长度，用来把“位移阈值”从相对比例转成绝对距离
+        hpwl_guard = self.rass["hpwl_guard"]# HPWL 的相对容差
+        avg_guard = diag * self.rass["disp_avg_guard"] # 平均位移的绝对上限 = 对角线 * 平均位移比例阈值
+        max_guard = diag * self.rass["disp_max_guard"]# 最大位移的绝对上限 = 对角线 * 最大位移比例阈值
+        hpwl_ok = baseline_hpwl <= 0 or hpwl <= baseline_hpwl * (1.0 + hpwl_guard + 1e-9)#要求候选 HPWL ≤ 基线HPWL*(1+容差+1e-9)，1e-9 是数值稳定冗余
+        return hpwl_ok and avg_disp <= avg_guard and max_disp <= max_guard# 只有同时满足：HPWL 合格、平均位移不超标、最大位移不超标，候选才通过守卫
 
-    def _score_candidate(self, hpwl, baseline_hpwl, risk, baseline_risk):
-        hpwl_ratio = hpwl / baseline_hpwl if baseline_hpwl > 0 else hpwl
-        if baseline_risk > 1e-9:
+    def _score_candidate(self, hpwl, baseline_hpwl, risk, baseline_risk): # 给某个候选解打分（分数越小越好）：综合考虑 HPWL 相对基线的比例 + 风险相对基线的比例
+        hpwl_ratio = hpwl / baseline_hpwl if baseline_hpwl > 0 else hpwl# 线长项：若有基线 HPWL，则用“候选HPWL / 基线HPWL”做无量纲比例。否则（基线无效≤0）直接用候选 hpwl 当作分数的一部分
+        if baseline_risk > 1e-9: # 风险项：同理，优先使用“候选风险 / 基线风险”做比例；若基线风险≈0，则退化为使用候选风险的绝对值
             risk_ratio = risk / baseline_risk
-        else:
+        else:#基线是用默认 GiFt 权重（0.2/0.7/0.1，外加其他基底的零权重）得到的初始坐标所测得的 HPWL
             risk_ratio = risk
-        return hpwl_ratio + self.rass["risk_weight"] * risk_ratio
+        return hpwl_ratio + self.rass["risk_weight"] * risk_ratio # 总分 = HPWL 比例 + 风险比例 * 风险权重
 
-    def _risk_push_basis(self, base):
+    def _risk_push_basis(self, base):#读取风险图梯度，给中频基施加“远离高风险”位移，形成新的风险梯度基
         centers = self._centers(base)
-        risk_vals = self._risk_sample(centers)
+        risk_vals = self._risk_sample(centers)# 在中心点处，从风险图上双线性插值得到风险值 R(x,y) => risk_vals[N]
         threshold = self.rass["threshold"]
-        severity = torch.clamp(risk_vals - threshold, min=0.0)
+        severity = torch.clamp(risk_vals - threshold, min=0.0)# 计算“超阈强度”severity：低于阈值τ不推动(=0)，超过阈值按超出量线性增长
         if severity.max() > 0:
-            severity = severity / severity.max()
-        grad_x, grad_y = self._risk_gradient(centers)
+            severity = severity / severity.max() # 将 severity 归一化到 [0,1]，确保最危险的点=1，其它按相对强度缩放
+        grad_x, grad_y = self._risk_gradient(centers) # 用中心差分法估计风险梯度 ∇R=(∂R/∂x, ∂R/∂y)
         grads = torch.stack([grad_x, grad_y], dim=1)
         step = severity.unsqueeze(1) * grads
-        max_step = torch.tensor(
+        max_step = torch.tensor(# 信任域半径：分别限制 x/y 方向的最大步长为 0.5 个 bin 尺寸，避免过冲/不稳定
             [self.rass["bin_size_x"], self.rass["bin_size_y"]],
             device=base.device,
             dtype=base.dtype,
         ) * 0.5
         step = torch.clamp(step, min=-max_step, max=max_step)
-        return base - step
+        return base - step # 沿“负梯度方向”移动：梯度指向风险增大的方向，减去 step 就是“远离高风险”。
 
-    def _centers(self, coords):
+    def _centers(self, coords):#把每个单元的“左下角坐标”转换成“中心坐标”
         if self.node_size_x is None:
             return coords
         size_x = self.node_size_x.to(coords.device)
@@ -283,7 +305,7 @@ class GiFtInit(nn.Module):
         centers[:, 1] = coords[:, 1] + 0.5 * size_y
         return centers
 
-    def _risk_sample(self, coords):
+    def _risk_sample(self, coords): #在离散的风险图 risk_map 上做【双线性插值】取样，返回对应的风险值向量
         risk_map = self.rass["risk_map"]
         if risk_map.device != coords.device:
             risk_map = risk_map.to(coords.device)
@@ -316,10 +338,10 @@ class GiFtInit(nn.Module):
             + (1.0 - tx) * ty * r01 \
             + tx * ty * r11
         return risk_val
-
+#估计风险图R（x,y）的梯度∇R（x,y）
     def _risk_gradient(self, centers):
         bin_size_x = centers.new_tensor(self.rass["bin_size_x"])
-        bin_size_y = centers.new_tensor(self.rass["bin_size_y"])
+        bin_size_y = centers.new_tensor(self.rass["bin_size_y"]) # 从 self.rass 里取出风险网格的 bin 尺寸（x/y 方向）
         plus_x = centers.clone()
         plus_x[:, 0] += bin_size_x
         minus_x = centers.clone()
@@ -331,10 +353,10 @@ class GiFtInit(nn.Module):
         r_plus_x = self._risk_sample(plus_x)
         r_minus_x = self._risk_sample(minus_x)
         r_plus_y = self._risk_sample(plus_y)
-        r_minus_y = self._risk_sample(minus_y)
-        grad_x = (r_plus_x - r_minus_x) / (2.0 * bin_size_x)
-        grad_y = (r_plus_y - r_minus_y) / (2.0 * bin_size_y)
-        return grad_x, grad_y
+        r_minus_y = self._risk_sample(minus_y)# 在四个偏移位置上采样风险值 R，通常是对risk_map 做双线性插值
+        grad_x = (r_plus_x - r_minus_x) / (2.0 * bin_size_x)# 用中心差分公式估计偏导
+        grad_y = (r_plus_y - r_minus_y) / (2.0 * bin_size_y)# ∂R/∂x ≈ [R(x+h,y) - R(x-h,y)] / (2h)      ∂R/∂y ≈ [R(x,y+h) - R(x,y-h)] / (2h)
+        return grad_x, grad_y# 返回两个一维张量，分别是 x/y 方向的风险梯度估计。
 
     def _avg_risk(self, loc):
         if not self.rass_enabled:
@@ -366,3 +388,16 @@ class GiFtInit(nn.Module):
             span_y = ys.max() - ys.min()
             total += span_x + span_y
         return total / max(len(self.hpwl_sample_indices), 1)
+
+    def update_rass(self, rass_options):
+        if rass_options is None:
+            self.rass = {}
+            self.rass_enabled = False
+            return
+        self.rass = rass_options# 保存新的 RASS 配置字典（里面应包含 enabled、risk_map、阈值、护栏等）
+        self.rass_enabled = bool(
+            self.rass.get("enabled", False) and self.rass.get("risk_map") is not None
+        )# 根据配置决定是否启用：- enabled 标志为 True- 且必须存在 risk_map。两者都满足才置为启用
+        
+        if self.rass_enabled:
+            self._setup_rass() # 若启用，做一次内部初始化/准备工作。例如缓存 num_movable/网格尺寸、把必要张量搬到合适的 device/dtype 等）
