@@ -125,7 +125,7 @@ class GiFtInit(nn.Module):
             start = time.time()
             low_pass_filter = mix_frequency_filter.GiFt_GPU(self.adj_mat, pos.device)
             # 构建 GiFt 的 GPU 频谱滤波器，基于 netlist 的邻接矩阵 self.adj_mat
-            # 用 Chebyshev 多项式近似图 Laplacian 的滤波操作
+            # 用 Chebyshev 多项式近似图 Laplacian 的滤波操作（不显式特征分解）
             low_pass_filter.train(4)
             location_low = low_pass_filter.get_cell_position(4, random_initial)
             # “低频基底”：用阶数 4 的 Chebyshev 低通滤波对随机初始进行平滑，得到较平滑/全局一致的坐标
@@ -146,7 +146,7 @@ class GiFtInit(nn.Module):
             # GiFt 经典固定配比：低/中/高/随机 = 0.2 / 0.7 / 0.1 / 0.0
             # 作为初始/基线权重（若不开启 RASS，自此直接用该配比融合）
             if self.rass_enabled:
-                risk_basis = self._risk_push_basis(location_mid)# 追加 _risk_push_basis 得到风险梯度基
+                risk_basis = self._risk_push_basis(location_mid)#135–142 行追加 _risk_push_basis 得到风险梯度基
                 # 基于“中频基底”再做一次“风险驱动推离”生成的风险基底（把细胞从高风险区往外推，带信任域/强度控制）
                 bases.append(risk_basis)
                 # 现在基底包含：低/中/高/随机/风险，共 5 路
@@ -154,7 +154,7 @@ class GiFtInit(nn.Module):
                 baseline_weights = torch.cat(
                     [baseline_weights, torch.zeros(1, device=pos_device, dtype=dtype)], dim=0
                 )
-                # 给风险基底的初始权重设为 0，在自适应搜索前，基线不强制引入风险项
+                # 给风险基底的初始权重设为 0（与论文一致：在自适应搜索前，基线不强制引入风险项）
                 blended, _ = self._select_rass_weights(bases, baseline_weights)
                 # 自适应权重选择：采样 Dirichlet 候选、快速评估（HPWL/密度/风险）、加“护栏”（HPWL/位移阈）
                 # 选出满足护栏的最优组合，得到最终融合坐标 blended（形状 [N, 2]）
@@ -198,88 +198,60 @@ class GiFtInit(nn.Module):
         weights = weights.view(-1, 1, 1)
         return torch.sum(stacked * weights, dim=0)
     #自适应谱混合（Dirichlet 采样 + 守卫）
-    def _select_rass_weights(self, bases, baseline_weights):
-        """Select the best spectral weights under HPWL / displacement guards."""
-        device = bases[0].device
+    def _select_rass_weights(self, bases, baseline_weights):# _select_rass_weights、_evaluate_candidate、_passes_guards、_score_candidate .对每个候选估计采样 HPWL、平均风险、平均/最大位移，并用守卫判定是否接受
+        device = bases[0].device                            #得分函数更偏向小 HPWL、低风险的组合，挑出最优权重
         dtype = bases[0].dtype
         num_bases = len(bases)
         base_w = baseline_weights
         if base_w.numel() < num_bases:
             pad = torch.zeros(num_bases - base_w.numel(), device=device, dtype=dtype)
             base_w = torch.cat([base_w, pad], dim=0)
+        weights_candidates = [base_w] # 候选权重列表，先放入基线权重
 
-        weights_candidates = [base_w]
-        if not self.rass.get('adapt_flag', True):
+        if not self.rass.get("adapt_flag", True):# 未启用自适应探索：仅构造一个“强调风险基”的候选
             risk_focus = base_w.clone()
             if num_bases > 4:
-                emphasis = 0.3
+                emphasis = 0.3 # 给风险基分配 0.3 权重
                 risk_focus[-1] = emphasis
                 remaining = max(1.0 - emphasis, 1e-6)
-                core = base_w[:-1]
+                core = base_w[:-1]# 其它基底的基线配比
                 core_sum = core.sum().item()
                 if core_sum > 0:
                     risk_focus[:-1] = core * (remaining / core_sum)
                 else:
                     risk_focus[:-1] = remaining / (num_bases - 1)
             weights_candidates.append(risk_focus)
-        else:
+        else:# 启用自适应探索：更全面地构造候选
             for i in range(num_bases):
                 one_hot = torch.zeros(num_bases, device=device, dtype=dtype)
                 one_hot[i] = 1.0
-                weights_candidates.append(one_hot)
+                weights_candidates.append(one_hot)# 逐一加入“单一基底”的 one-hot 候选（强调每个基底）
             alpha = np.ones(num_bases)
-            for _ in range(self.rass.get('num_samples', 0)):
+            for _ in range(self.rass.get("num_samples", 0)):
                 sample = torch.from_numpy(np.random.dirichlet(alpha)).to(device=device, dtype=dtype)
-                weights_candidates.append(sample)
+                weights_candidates.append(sample) # 再从 Dirichlet 分布采样若干组权重
 
-        baseline_loc = self._blend_bases(bases, base_w)
-        baseline_hpwl, baseline_risk, _, _ = self._evaluate_candidate(baseline_loc, baseline_loc)
-
-        best_weights = base_w
+        baseline_loc = self._blend_bases(bases, base_w)# 用基线权重融合出“基线位置”，作为比较参照
+        baseline_hpwl, baseline_risk, _, _ = self._evaluate_candidate(baseline_loc, baseline_loc) # 评估基线：得到基线 HPWL 与基线风险
+        best_weights = base_w# 当前最优候选 = 基线
         best_loc = baseline_loc
-        best_score = float('inf')
-        best_hpwl = baseline_hpwl
-        best_risk = baseline_risk
-        total_candidates = len(weights_candidates)
-        accepted_candidates = 0
-        guard_fail_hist = {'hpwl': 0, 'avg_disp': 0, 'max_disp': 0}
+        best_score = float("inf") # 最优分数初始化为 +∞
 
         for weights in weights_candidates:
-            loc = self._blend_bases(bases, weights)
-            hpwl, risk, avg_disp, max_disp = self._evaluate_candidate(loc, baseline_loc)
-            passed, fail_reason = self._passes_guards(hpwl, baseline_hpwl, avg_disp, max_disp)
-            if not passed:
-                if fail_reason in guard_fail_hist:
-                    guard_fail_hist[fail_reason] += 1
+            loc = self._blend_bases(bases, weights) # 用候选权重融合出候选位置
+            hpwl, risk, avg_disp, max_disp = self._evaluate_candidate(loc, baseline_loc)# 评估候选：返回 HPWL、平均风险、平均/最大位移
+            if not self._passes_guards(hpwl, baseline_hpwl, avg_disp, max_disp):# 守卫判定：若 HPWL 超过基线允许比例或位移超过阈值，直接淘汰
                 continue
-            accepted_candidates += 1
-            score = self._score_candidate(hpwl, baseline_hpwl, risk, baseline_risk)
+            score = self._score_candidate(hpwl, baseline_hpwl, risk, baseline_risk)# 偏向 HPWL 更小、风险更低的候选（具体权衡在 _score_candidate 里）
             if score < best_score:
                 best_score = score
                 best_weights = weights
-                best_loc = loc
-                best_hpwl = hpwl
-                best_risk = risk
+                best_loc = loc# 记录更优的候选
 
-        if best_score == float('inf'):
-            return baseline_loc, base_w
+        if best_score == float("inf"):
+            return baseline_loc, base_w# 若无任何候选通过守卫，则回退到基线
 
-        if self.rass_enabled:
-            logger.info(
-                'RASS init -> baseline HPWL %.3e, baseline risk %.4f, candidates %d, accepted %d, guard rejects (hpwl:%d avg:%d max:%d), selected HPWL %.3e, risk %.4f',
-                baseline_hpwl,
-                baseline_risk,
-                total_candidates,
-                accepted_candidates,
-                guard_fail_hist['hpwl'],
-                guard_fail_hist['avg_disp'],
-                guard_fail_hist['max_disp'],
-                best_hpwl,
-                best_risk,
-            )
-            logger.debug('RASS init -> selected weights %s', best_weights.detach().cpu().numpy())
-
-        return best_loc, best_weights
+        return best_loc, best_weights # 返回最终选中的融合位置与对应权重
 
     def _evaluate_candidate(self, loc, baseline_loc):
         hpwl = self._approx_hpwl(loc)# 估计该候选位置 loc 的 HPWL（通常是采样/近似计算的 HPWL，用来衡量线长好坏）
@@ -289,21 +261,13 @@ class GiFtInit(nn.Module):
         max_disp = disp.max().item()
         return hpwl, risk, avg_disp, max_disp
 
-    def _passes_guards(self, hpwl, baseline_hpwl, avg_disp, max_disp):
-        diag = self.rass["layout_diag"]
-        hpwl_guard = self.rass["hpwl_guard"]
-        avg_guard = diag * self.rass["disp_avg_guard"]
-        max_guard = diag * self.rass["disp_max_guard"]
-        hpwl_ok = baseline_hpwl <= 0 or hpwl <= baseline_hpwl * (1.0 + hpwl_guard + 1e-9)
-        avg_ok = avg_disp <= avg_guard
-        max_ok = max_disp <= max_guard
-        if hpwl_ok and avg_ok and max_ok:
-            return True, None
-        if not hpwl_ok:
-            return False, "hpwl"
-        if not avg_ok:
-            return False, "avg_disp"
-        return False, "max_disp"
+    def _passes_guards(self, hpwl, baseline_hpwl, avg_disp, max_disp):#筛掉不稳定的候选初始化
+        diag = self.rass["layout_diag"]# 版图对角线长度，用来把“位移阈值”从相对比例转成绝对距离
+        hpwl_guard = self.rass["hpwl_guard"]# HPWL 的相对容差
+        avg_guard = diag * self.rass["disp_avg_guard"] # 平均位移的绝对上限 = 对角线 * 平均位移比例阈值
+        max_guard = diag * self.rass["disp_max_guard"]# 最大位移的绝对上限 = 对角线 * 最大位移比例阈值
+        hpwl_ok = baseline_hpwl <= 0 or hpwl <= baseline_hpwl * (1.0 + hpwl_guard + 1e-9)#要求候选 HPWL ≤ 基线HPWL*(1+容差+1e-9)，1e-9 是数值稳定冗余
+        return hpwl_ok and avg_disp <= avg_guard and max_disp <= max_guard# 只有同时满足：HPWL 合格、平均位移不超标、最大位移不超标，候选才通过守卫
 
     def _score_candidate(self, hpwl, baseline_hpwl, risk, baseline_risk): # 给某个候选解打分（分数越小越好）：综合考虑 HPWL 相对基线的比例 + 风险相对基线的比例
         hpwl_ratio = hpwl / baseline_hpwl if baseline_hpwl > 0 else hpwl# 线长项：若有基线 HPWL，则用“候选HPWL / 基线HPWL”做无量纲比例。否则（基线无效≤0）直接用候选 hpwl 当作分数的一部分

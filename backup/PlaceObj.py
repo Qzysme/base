@@ -1046,162 +1046,159 @@ class PlaceObj(nn.Module):
             pin_stretch_ratio=params.pin_stretch_ratio,
             deterministic_flag=params.deterministic_flag)
 
-    def build_rass_state(self, params, placedb, data_collections):
-        """Build and cache the current RASS state."""
-        return self._build_rass_state_impl(params, placedb, data_collections)
-
 #扫描固定宏、宏 pin 等，以面积重叠和 pin 数累加成基础风险图。可选叠加 RUDY 拥塞图、pin 利用率图，并做 3×3／5×5 高斯平滑。归一化风险图，缓存网格尺寸、阈值、初始风险权重形成rass_state
-    def _build_rass_state_impl(self, params, placedb, data_collections):
-        # 构建 RASS 所需的“风险状态”（主要是风险热图）
-    
-        device = data_collections.pos[0].device
-        # 从位置张量里拿到当前的设备（CPU/GPU），后续把张量都放到同一设备上
-    
-        dtype = data_collections.pos[0].dtype
-        # 取出位置张量的数据类型（如 torch.float32），保证后续计算类型一致
-    
-        num_bins_x = self.num_bins_x
-        num_bins_y = self.num_bins_y
-        # 风险网格（heatmap）的 x/y 方向划分的 bin 数
-    
-        bin_size_x = self.bin_size_x
-        bin_size_y = self.bin_size_y
-        # 每个 bin 在物理坐标中的宽和高
-    
-        bin_area = max(bin_size_x * bin_size_y, 1e-12)
-        # 每个 bin 的面积（带下限，防止后面做除法出现除 0）
-    
-        risk_np = np.zeros((num_bins_x, num_bins_y), dtype=np.float64)
-        # 用 numpy 初始化一个全 0 的风险二维数组（双精度，之后再转 torch）
-    
-        pin_counts = data_collections.pin_weights.detach().cpu().numpy()
-        # 取出每个节点/单元的“引脚权重”（引脚数或其权重），拷到 CPU，转为 numpy
-    
-        node_x = placedb.node_x
-        node_y = placedb.node_y
-        node_size_x = placedb.node_size_x
-        node_size_y = placedb.node_size_y
-        # 从 place 数据库中获取每个节点（单元/宏/IO）的几何信息：左下角坐标和宽高
-    
-        fixed_start = placedb.num_movable_nodes
-        fixed_end = placedb.num_movable_nodes + placedb.num_terminals
-        # 计算固定对象（不可移动的宏/IO）在数组中的索引范围：[fixed_start, fixed_end)
-    
-        for idx in range(fixed_start, fixed_end):
-            # 遍历所有固定对象：把它们的几何影响投影到风险网格上
-    
-            width = node_size_x[idx]
-            height = node_size_y[idx]
-            if width <= 0 or height <= 0:
+def build_rass_state(self, params, placedb, data_collections):
+    # 构建 RASS 所需的“风险状态”（主要是风险热图）
+
+    device = data_collections.pos[0].device
+    # 从位置张量里拿到当前的设备（CPU/GPU），后续把张量都放到同一设备上
+
+    dtype = data_collections.pos[0].dtype
+    # 取出位置张量的数据类型（如 torch.float32），保证后续计算类型一致
+
+    num_bins_x = self.num_bins_x
+    num_bins_y = self.num_bins_y
+    # 风险网格（heatmap）的 x/y 方向划分的 bin 数
+
+    bin_size_x = self.bin_size_x
+    bin_size_y = self.bin_size_y
+    # 每个 bin 在物理坐标中的宽和高
+
+    bin_area = max(bin_size_x * bin_size_y, 1e-12)
+    # 每个 bin 的面积（带下限，防止后面做除法出现除 0）
+
+    risk_np = np.zeros((num_bins_x, num_bins_y), dtype=np.float64)
+    # 用 numpy 初始化一个全 0 的风险二维数组（双精度，之后再转 torch）
+
+    pin_counts = data_collections.pin_weights.detach().cpu().numpy()
+    # 取出每个节点/单元的“引脚权重”（引脚数或其权重），拷到 CPU，转为 numpy
+
+    node_x = placedb.node_x
+    node_y = placedb.node_y
+    node_size_x = placedb.node_size_x
+    node_size_y = placedb.node_size_y
+    # 从 place 数据库中获取每个节点（单元/宏/IO）的几何信息：左下角坐标和宽高
+
+    fixed_start = placedb.num_movable_nodes
+    fixed_end = placedb.num_movable_nodes + placedb.num_terminals
+    # 计算固定对象（不可移动的宏/IO）在数组中的索引范围：[fixed_start, fixed_end)
+
+    for idx in range(fixed_start, fixed_end):
+        # 遍历所有固定对象：把它们的几何影响投影到风险网格上
+
+        width = node_size_x[idx]
+        height = node_size_y[idx]
+        if width <= 0 or height <= 0:
+            continue
+        # 跳过宽高非法的对象
+
+        x0 = node_x[idx]
+        y0 = node_y[idx]
+        x1 = x0 + width
+        y1 = y0 + height
+        # 固定对象的包围盒坐标（物理坐标系）
+
+        bx0 = max(int(np.floor((x0 - placedb.xl) / bin_size_x)), 0)
+        bx1 = min(int(np.ceil((x1 - placedb.xl) / bin_size_x)), num_bins_x)
+        by0 = max(int(np.floor((y0 - placedb.yl) / bin_size_y)), 0)
+        by1 = min(int(np.ceil((y1 - placedb.yl) / bin_size_y)), num_bins_y)
+        # 把物理坐标投射到离散网格：求出与该对象重叠的 bin 的 x/y 索引范围
+        # placedb.xl/yl 是芯片左下角；用 floor/ceil 找到覆盖的离散区间，并裁剪在合法范围内
+
+        if bx0 >= bx1 or by0 >= by1:
+            continue
+        # 没有有效重叠就跳过
+
+        weight = 1.0 + float(pin_counts[idx]) if idx < pin_counts.shape[0] else 1.0
+        # 为该固定对象设置权重：1 + 引脚权重（如果 pin_counts 有这个 idx）
+        # 引脚越多/权重越大，对应风险贡献越大；没有则退化为 1.0。实现式中的 (1+𝑐_𝑓)
+
+        for bx in range(bx0, bx1):
+            # 遍历与该对象重叠的所有 x 向 bin
+
+            bin_x0 = placedb.xl + bx * bin_size_x
+            bin_x1 = bin_x0 + bin_size_x
+            # 该 x-bin 的左右边界（物理坐标）
+
+            overlap_x = max(0.0, min(x1, bin_x1) - max(x0, bin_x0))
+            # 计算对象与该 x-bin 的重叠长度（x 方向）
+
+            if overlap_x <= 0:
                 continue
-            # 跳过宽高非法的对象
-    
-            x0 = node_x[idx]
-            y0 = node_y[idx]
-            x1 = x0 + width
-            y1 = y0 + height
-            # 固定对象的包围盒坐标（物理坐标系）
-    
-            bx0 = max(int(np.floor((x0 - placedb.xl) / bin_size_x)), 0)
-            bx1 = min(int(np.ceil((x1 - placedb.xl) / bin_size_x)), num_bins_x)
-            by0 = max(int(np.floor((y0 - placedb.yl) / bin_size_y)), 0)
-            by1 = min(int(np.ceil((y1 - placedb.yl) / bin_size_y)), num_bins_y)
-            # 把物理坐标投射到离散网格：求出与该对象重叠的 bin 的 x/y 索引范围
-            # placedb.xl/yl 是芯片左下角；用 floor/ceil 找到覆盖的离散区间，并裁剪在合法范围内
-    
-            if bx0 >= bx1 or by0 >= by1:
-                continue
-            # 没有有效重叠就跳过
-    
-            weight = 1.0 + float(pin_counts[idx]) if idx < pin_counts.shape[0] else 1.0
-            # 为该固定对象设置权重：1 + 引脚权重（如果 pin_counts 有这个 idx）
-            # 引脚越多/权重越大，对应风险贡献越大；没有则退化为 1.0。实现式中的 (1+𝑐_𝑓)
-    
-            for bx in range(bx0, bx1):
-                # 遍历与该对象重叠的所有 x 向 bin
-    
-                bin_x0 = placedb.xl + bx * bin_size_x
-                bin_x1 = bin_x0 + bin_size_x
-                # 该 x-bin 的左右边界（物理坐标）
-    
-                overlap_x = max(0.0, min(x1, bin_x1) - max(x0, bin_x0))
-                # 计算对象与该 x-bin 的重叠长度（x 方向）
-    
-                if overlap_x <= 0:
+            # 如果 x 方向没有重叠，跳过对应 y 循环
+
+            for by in range(by0, by1):
+                # 遍历与该对象重叠的所有 y 向 bin
+
+                bin_y0 = placedb.yl + by * bin_size_y
+                bin_y1 = bin_y0 + bin_size_y
+                # 该 y-bin 的下/上边界
+
+                overlap_y = max(0.0, min(y1, bin_y1) - max(y0, bin_y0))
+                # 计算对象与该 y-bin 的重叠长度（y 方向）
+
+                if overlap_y <= 0:
                     continue
-                # 如果 x 方向没有重叠，跳过对应 y 循环
-    
-                for by in range(by0, by1):
-                    # 遍历与该对象重叠的所有 y 向 bin
-    
-                    bin_y0 = placedb.yl + by * bin_size_y
-                    bin_y1 = bin_y0 + bin_size_y
-                    # 该 y-bin 的下/上边界
-    
-                    overlap_y = max(0.0, min(y1, bin_y1) - max(y0, bin_y0))
-                    # 计算对象与该 y-bin 的重叠长度（y 方向）
-    
-                    if overlap_y <= 0:
-                        continue
-                    # y 方向没重叠就跳过
-    
-                    risk_np[bx, by] += weight * (overlap_x * overlap_y) / bin_area
-                    # 将重叠面积占比（相对于一个 bin 的面积）乘权重，累加到该 bin 的风险值
-                    #固定块覆盖的面积越多、引脚越多，对该 bin 的“风险”贡献越大
-    
-        risk_tensor = torch.from_numpy(risk_np).to(device=device, dtype=dtype)
-        # 把 numpy 风险图转成 torch 张量，并放到目标设备/类型上.这样就能用 PyTorch 的算子在 CPU/GPU 上继续计算
-    
-        risk_tensor = self._apply_gaussian_blur(risk_tensor, kernel_size=3)
-        # 先做一次 3x3 高斯模糊（细粒度平滑），抑制离散化的锯齿/噪声
-    
-        with torch.no_grad():
-            # 下面这段不需要参与反向传播，仅作为辅助场叠加
-    
-            if params.rass_route_weight > 0 and getattr(self.op_collections, "route_utilization_map_op", None) is not None:
-                # 如果开启了 route 风险权重，且提供了路由利用率算子
-    
-                route_map = self.op_collections.route_utilization_map_op(data_collections.pos[0]).to(device=device, dtype=dtype)
-                # 根据当前单元坐标 pos 计算路由利用率热图（RUDY 风格），并对齐设备/类型
-    
-                route_map = self._resize_risk_map(route_map, (num_bins_x, num_bins_y))
-                # 将路由热图 resize 到与风险网格相同的分辨率（bin 尺寸）
-    
-                max_route = torch.max(route_map)
-                if max_route > 0:
-                    route_map = route_map / max_route
-                # 做一次最大值归一化，把 route_map 标准化到 [0,1]
-    
-                risk_tensor = risk_tensor + params.rass_route_weight * route_map
-                # 按权重把路由热点叠加到风险图中
-    
-            if params.rass_pin_weight > 0 and getattr(self.op_collections, "pin_utilization_map_op", None) is not None:
-                # 若开启了引脚利用率风险权重，且提供了引脚利用率算子
-    
-                pin_map = self.op_collections.pin_utilization_map_op(data_collections.pos[0]).to(device=device, dtype=dtype)
-                # 基于当前 pos 计算引脚利用率热图
-    
-                pin_map = self._resize_risk_map(pin_map, (num_bins_x, num_bins_y))
-                # 同样 resize 到风险网格大小
-    
-                max_pin = torch.max(pin_map)
-                if max_pin > 0:
-                    pin_map = pin_map / max_pin
-                # 最大值归一化到 [0,1]
-    
-                risk_tensor = risk_tensor + params.rass_pin_weight * pin_map
-                # 将引脚热点按权重叠加进风险图
-    
-        if params.rass_multiscale_weight > 0:
-            # 如果开启了多尺度融合
-    
-            coarse = self._apply_gaussian_blur(risk_tensor, kernel_size=5)
-            # 再做一次更“粗”的 5x5 高斯平滑，得到长尺度的上下文（通道/走廊等）
-    
-            risk_tensor = (1.0 - params.rass_multiscale_weight) * risk_tensor + params.rass_multiscale_weight * coarse
-            # 用 α 做 fine/coarse 融合：risk = (1-α)*细 + α*粗
-            # 这样既保留局部热点，又注入大范围的风险趋势
-    
+                # y 方向没重叠就跳过
+
+                risk_np[bx, by] += weight * (overlap_x * overlap_y) / bin_area
+                # 将重叠面积占比（相对于一个 bin 的面积）乘权重，累加到该 bin 的风险值
+                #固定块覆盖的面积越多、引脚越多，对该 bin 的“风险”贡献越大
+
+    risk_tensor = torch.from_numpy(risk_np).to(device=device, dtype=dtype)
+    # 把 numpy 风险图转成 torch 张量，并放到目标设备/类型上.这样就能用 PyTorch 的算子在 CPU/GPU 上继续计算
+
+    risk_tensor = self._apply_gaussian_blur(risk_tensor, kernel_size=3)
+    # 先做一次 3x3 高斯模糊（细粒度平滑），抑制离散化的锯齿/噪声
+
+    with torch.no_grad():
+        # 下面这段不需要参与反向传播，仅作为辅助场叠加
+
+        if params.rass_route_weight > 0 and getattr(self.op_collections, "route_utilization_map_op", None) is not None:
+            # 如果开启了 route 风险权重，且提供了路由利用率算子
+
+            route_map = self.op_collections.route_utilization_map_op(data_collections.pos[0]).to(device=device, dtype=dtype)
+            # 根据当前单元坐标 pos 计算路由利用率热图（RUDY 风格），并对齐设备/类型
+
+            route_map = self._resize_risk_map(route_map, (num_bins_x, num_bins_y))
+            # 将路由热图 resize 到与风险网格相同的分辨率（bin 尺寸）
+
+            max_route = torch.max(route_map)
+            if max_route > 0:
+                route_map = route_map / max_route
+            # 做一次最大值归一化，把 route_map 标准化到 [0,1]
+
+            risk_tensor = risk_tensor + params.rass_route_weight * route_map
+            # 按权重把路由热点叠加到风险图中
+
+        if params.rass_pin_weight > 0 and getattr(self.op_collections, "pin_utilization_map_op", None) is not None:
+            # 若开启了引脚利用率风险权重，且提供了引脚利用率算子
+
+            pin_map = self.op_collections.pin_utilization_map_op(data_collections.pos[0]).to(device=device, dtype=dtype)
+            # 基于当前 pos 计算引脚利用率热图
+
+            pin_map = self._resize_risk_map(pin_map, (num_bins_x, num_bins_y))
+            # 同样 resize 到风险网格大小
+
+            max_pin = torch.max(pin_map)
+            if max_pin > 0:
+                pin_map = pin_map / max_pin
+            # 最大值归一化到 [0,1]
+
+            risk_tensor = risk_tensor + params.rass_pin_weight * pin_map
+            # 将引脚热点按权重叠加进风险图
+
+    if params.rass_multiscale_weight > 0:
+        # 如果开启了多尺度融合
+
+        coarse = self._apply_gaussian_blur(risk_tensor, kernel_size=5)
+        # 再做一次更“粗”的 5x5 高斯平滑，得到长尺度的上下文（通道/走廊等）
+
+        risk_tensor = (1.0 - params.rass_multiscale_weight) * risk_tensor + params.rass_multiscale_weight * coarse
+        # 用 α 做 fine/coarse 融合：risk = (1-α)*细 + α*粗
+        # 这样既保留局部热点，又注入大范围的风险趋势
+
+
         risk_tensor = risk_tensor.clamp(min=0)
         # 把风险图中所有负值截断为 0，确保风险非负
         max_val = torch.max(risk_tensor)
@@ -1221,12 +1218,12 @@ class PlaceObj(nn.Module):
             "xl": torch.tensor(placedb.xl, dtype=dtype, device=device),
             "yl": torch.tensor(placedb.yl, dtype=dtype, device=device),
              # 版图左下角坐标，用于把物理坐标定位到风险网格
-    
+
             "num_movable": placedb.num_movable_nodes,
             # 可移动节点数量（整型），方便后续切片/统计
             "area_weights": data_collections.node_areas[:placedb.num_movable_nodes],
             # 可移动节点的面积权重 a_i；风险惩罚通常按面积加权
-    
+
             "num_bins_x": num_bins_x,
             "num_bins_y": num_bins_y,
             # 风险网格的离散尺寸（x/y 方向的 bin 数）
@@ -1237,11 +1234,12 @@ class PlaceObj(nn.Module):
         }
         state["base_weight"] = state["weight"].clone()
         # 备份一份初始风险权重，供动态调度时回退或按相对比例调整
-    
+
         state["last_refresh_iter"] = -1
         # 上一次风险图刷新的迭代号；-1 表示尚未刷新过（配合周期刷新策略）
         return state
-        # 返回打包好的 RASS 状态
+    # 返回打包好的 RASS 状态
+#*********************************************************************************
     #准备与GiFt初始化挂钩，把风险图、阈值、守卫、采样数等封装给 GiFt
     def _compose_rass_options(self, params, placedb):
         if self.rass_state is None:
@@ -1380,176 +1378,142 @@ class PlaceObj(nn.Module):
         ):
             return False
         last_iter = self.rass_state.get("last_refresh_iter", -1)
-        if not force and iteration is not None and last_iter >= 0:
+        if not force and iteration is not None and last_iter >= 0:# 若不是强制刷新，且有当前迭代号且曾刷新过，若距离上次刷新不到设定的刷新间隔（rass_refresh_interval），就暂不刷新
             if iteration - last_iter < params.rass_refresh_interval:
                 return False
         with torch.no_grad():
             preserved_weight = self.rass_state["weight"].clone()
-            preserved_base = self.rass_state.get("base_weight", preserved_weight.clone())
-            new_state = self.build_rass_state(params, placedb, self.data_collections)
+            preserved_base = self.rass_state.get("base_weight", preserved_weight.clone())# 先把当前风险权重 λ_r（weight）和基线权重（base_weight）备份，稍后回填
+            new_state = self.build_rass_state(params, placedb, self.data_collections)# 重新构建 RASS 状态：重算风险图（可能基于最新坐标/利用率），并返回新 state
             new_state["weight"] = preserved_weight
-            new_state["base_weight"] = preserved_base
-            new_state["last_refresh_iter"] = iteration if iteration is not None else 0
-            self.rass_state = new_state
-            self.data_collections.rass_risk_map = self.rass_state["risk_map"]
+            new_state["base_weight"] = preserved_base# 用备份回填风险权重与基线，避免刷新把动态调度过的权重重置掉
+            new_state["last_refresh_iter"] = iteration if iteration is not None else 0# 记录这次刷新的迭代号；若未知则记 0
+            self.rass_state = new_state# 用新 state 覆盖旧的 RASS 状态
+            self.data_collections.rass_risk_map = self.rass_state["risk_map"]# 把新风险图同步到 data_collections，供其它模块直接使用
             rass_options = self._compose_rass_options(params, placedb)
             if rass_options and getattr(self.op_collections, "gift_init_op", None):
-                self.op_collections.gift_init_op.update_rass(rass_options)
-            risk_map = self.rass_state["risk_map"]
-            max_risk = float(risk_map.max().item()) if risk_map.numel() else 0.0
-            mean_risk = float(risk_map.mean().item()) if risk_map.numel() else 0.0
-            logging.info(
-                "RASS refresh -> iteration %s, risk max %.3f, mean %.3f, weight %.4f (base %.4f)",
-                "-" if iteration is None else iteration,
-                max_risk,
-                mean_risk,
-                float(self.rass_state["weight"].item()),
-                float(self.rass_state["base_weight"].item()),
-            )
+                self.op_collections.gift_init_op.update_rass(rass_options) # 重新打包 RASS 选项并通知下游（如 GiFt 初始化算子）更新内部配置
         return True
-
-    def schedule_rass_weights(self, params, iteration, route_metrics=None, pin_metrics=None):
+    #schedule_rass_weights 使用 rass_feedback_* 参数调节风险权重
+    def schedule_rass_weights(self, params, iteration, route_metrics=None, pin_metrics=None):# 按“拥塞压力”动态调节风险权重 λ_r（rass_state["weight"]）,route_metrics/pin_metrics 为可选的拥塞与引脚指标字典
         if (
             self.rass_state is None
             or not params.rass_place_flag
             or not params.rass_feedback_flag
         ):
-            return False
-        overflow_high = getattr(params, "rass_feedback_overflow_high", 0.2)
+            return False # 若未构建 RASS 状态、未开启 RASS、或未开启反馈调度，则不做任何事
+        overflow_high = getattr(params, "rass_feedback_overflow_high", 0.2)# - overflow_high/low：上/下阈形成“滞回区”，避免权重在边界来回抖动
         overflow_low = getattr(params, "rass_feedback_overflow_low", 0.05)
-        step_up = getattr(params, "rass_feedback_weight_step_up", 0.2)
+        step_up = getattr(params, "rass_feedback_weight_step_up", 0.2)# - step_up/down：每次上调/下调的步幅（相对于 base_weight 的比例）
         step_down = getattr(params, "rass_feedback_weight_step_down", 0.1)
-        clip_ratio = max(getattr(params, "rass_feedback_weight_clip", 3.0), 1.0)
-
+        clip_ratio = max(getattr(params, "rass_feedback_weight_clip", 3.0), 1.0)# - clip_ratio：相对基线的裁剪倍数（权重 ∈ [base/clip, base*clip]）
+        # 上述调度参数（带默认值）
         pressure_terms = []
-        if route_metrics:
-            pressure_terms.append(max(route_metrics.get("avg_overflow", 0.0), 0.0))
-            pressure_terms.append(max(route_metrics.get("max_util", 0.0) - 1.0, 0.0))
-        if pin_metrics:
+        if route_metrics:# 路由压力项
+            pressure_terms.append(max(route_metrics.get("avg_overflow", 0.0), 0.0))# - avg_overflow：平均溢出（越大越拥塞）
+            pressure_terms.append(max(route_metrics.get("max_util", 0.0) - 1.0, 0.0))# - max_util-1：最大利用率超过 100% 的超额部分（例：1.18 -> 0.18）
+        if pin_metrics:# 引脚压力项
             pressure_terms.append(max(pin_metrics.get("avg_overflow", 0.0), 0.0))
-            pressure_terms.append(max(pin_metrics.get("max_util", 0.0) - 1.0, 0.0))
-            pressure_terms.append(max(pin_metrics.get("high_risk_ratio", 0.0), 0.0))
+            pressure_terms.append(max(pin_metrics.get("max_util", 0.0) - 1.0, 0.0))# - avg_overflow、max_util 同上
+            pressure_terms.append(max(pin_metrics.get("high_risk_ratio", 0.0), 0.0))# - high_risk_ratio：高风险 bin 的占比（越大表示风险更普遍）
         pressure = max(pressure_terms) if pressure_terms else 0.0
-
+         # 取所有压力项中的最大值作为“总压力”指标
         base_weight = self.rass_state.get("base_weight", self.rass_state["weight"])
         base_val = float(base_weight.item())
         if base_val <= 0:
-            return False
+            return False# 基线权重（初始 λ_r），基线 <= 0 时不调度
         current_val = float(self.rass_state["weight"].item())
         max_weight = base_val * clip_ratio
-        min_weight = base_val / clip_ratio if clip_ratio > 1.0 else base_val * 0.5
+        min_weight = base_val / clip_ratio if clip_ratio > 1.0 else base_val * 0.5# 计算权重允许的上下限： [base/clip, base*clip]，若 clip_ratio == 1 则允许对称 0.5×base 的下界（保守兜底）
         updated_val = current_val
         if pressure > overflow_high:
-            updated_val = min(max_weight, current_val + base_val * step_up)
+            updated_val = min(max_weight, current_val + base_val * step_up)# 压力高于上阈：上调权重（以 base 为步长单位），并裁剪到 max_weight
         elif pressure < overflow_low:
-            updated_val = max(min_weight, current_val - base_val * step_down)
+            updated_val = max(min_weight, current_val - base_val * step_down)# 压力低于下阈：下调权重，并裁剪到 min_weight
+        # 若处于滞回区 [overflow_low, overflow_high]：不变
         if abs(updated_val - current_val) < 1e-9:
             return False
-
-        self.rass_state["weight"].data.fill_(updated_val)
+        # 若变化极小（≈未变），直接返回 False
+        self.rass_state["weight"].data.fill_(updated_val)# 若变化极小（≈未变），直接返回 False
         rass_options = self._compose_rass_options(params, placedb=self.placedb)
         if rass_options and getattr(self.op_collections, "gift_init_op", None):
-            self.op_collections.gift_init_op.update_rass(rass_options)
-
-        logging.info(
-            "RASS feedback -> iteration %s, pressure %.4f, weight %.4f -> %.4f (base %.4f)",
-            "-" if iteration is None else iteration,
-            pressure,
-            current_val,
-            updated_val,
-            base_val,
-        )
-        if route_metrics or pin_metrics:
-            logging.debug(
-                "RASS feedback metrics -> route %s pin %s",
-                route_metrics,
-                pin_metrics,
-            )
-        return True
-
-    def repair_rass_hotspots(self, params, placedb, pos_tensor, route_metrics=None, pin_metrics=None):
+            self.op_collections.gift_init_op.update_rass(rass_options) # 将更新后的选项推送给初始化算子（如 GiFt 初始化 op），使运行中生效
+        return True # 返回 True 表示本次确实更新了风险权重
+    #repair_rass_hotspots 在高风险 bin 内执行局部修复。
+    def repair_rass_hotspots(self, params, placedb, pos_tensor, route_metrics=None, pin_metrics=None):    # 基于风险图，对最高风险的若干 bin 做一次轻量的局部“推离”修复（把在该 bin 内的可移动单元往 bin 外推）
         if (
             self.rass_state is None
             or not params.rass_place_flag
             or not params.rass_feedback_flag
         ):
-            return False
+            return False# 若未构建 RASS 状态、未开启 RASS、或未开启反馈功能，直接不做修复
         topk = int(max(getattr(params, "rass_hotspot_topk", 0), 0))
         if topk <= 0:
-            return False
-        threshold = getattr(params, "rass_hotspot_threshold", 0.9)
+            return False # 取要修复的“热点 bin 个数” topk（<=0 则不修）
+        threshold = getattr(params, "rass_hotspot_threshold", 0.9)# 风险阈值：只有风险值超过该阈的 bin 才视为需要修复的热点
         risk_map = self.rass_state["risk_map"]
         if risk_map is None or risk_map.numel() == 0:
-            return False
-        flat = risk_map.view(-1)
+            return False # 没有风险图就不修
+        flat = risk_map.view(-1)# 把 2D 风险图拉平成 1D，便于做 topk
         k = min(topk, flat.numel())
-        values, indices = torch.topk(flat, k)
+        values, indices = torch.topk(flat, k)# 取风险值最高的 k 个元素：values 是风险值，indices 是对应的扁平索引
         mask = values > threshold
         if mask.sum() == 0:
             return False
+        # 只保留超过阈值的那些 bin；如果都不超过，就不需要修复
         num_bins_y = self.rass_state["num_bins_y"]
         bin_size_x = float(self.rass_state["bin_size_x"].item())
         bin_size_y = float(self.rass_state["bin_size_y"].item())
         xl = float(self.rass_state["xl"].item())
         yl = float(self.rass_state["yl"].item())
-        pos_view = pos_tensor.view(2, -1)
+        # 取出网格尺寸、每个 bin 的物理大小，以及版图左下角坐标。risk_map 的形状约定是 (num_bins_x, num_bins_y)，即先 x 后 y
+        pos_view = pos_tensor.view(2, -1)# 位置张量视作 [2, N]（第 0 行是 x， 第 1 行是 y），不拷贝数据
         node_size_x = self.data_collections.node_size_x[: self.rass_state["num_movable"]]
         node_size_y = self.data_collections.node_size_y[: self.rass_state["num_movable"]]
         centers_x = pos_view[0, : self.rass_state["num_movable"]] + 0.5 * node_size_x
         centers_y = pos_view[1, : self.rass_state["num_movable"]] + 0.5 * node_size_y
+         # 仅取“可移动单元”的宽高（长度 = num_movable）。# 计算可移动单元的中心坐标（x/y）
         updated = False
-        touched_bins = 0
-        moved_cells = 0
         with torch.no_grad():
-            for flat_idx, value in zip(indices[mask], values[mask]):
-                bx = int(flat_idx.item() // num_bins_y)
-                by = int(flat_idx.item() % num_bins_y)
+            for flat_idx, value in zip(indices[mask], values[mask]): # 遍历所有超过阈值的热点 bin（按风险大小排序后的子集）
+                bx = int(flat_idx.item() // num_bins_y)# 从扁平索引还原 2D 索引 (bx, by)
+                by = int(flat_idx.item() % num_bins_y) # 这里用 num_bins_y 做除/模，与 risk_map 的 (x,y) 维度约定一致
                 bin_xl = xl + bx * bin_size_x
                 bin_xh = bin_xl + bin_size_x
                 bin_yl = yl + by * bin_size_y
-                bin_yh = bin_yl + bin_size_y
+                bin_yh = bin_yl + bin_size_y# 计算该 bin 的物理边界 [bin_xl, bin_xh) × [bin_yl, bin_yh)
                 in_bin = (
                     (centers_x >= bin_xl)
                     & (centers_x < bin_xh)
                     & (centers_y >= bin_yl)
                     & (centers_y < bin_yh)
-                )
-                count_in_bin = int(in_bin.sum().item())
-                if count_in_bin == 0:
-                    continue
-                touched_bins += 1
-                moved_cells += count_in_bin
+                )# 找出“中心点落在该 bin 内”的可移动单元（布尔掩码）
+                if in_bin.sum() == 0:
+                    continue # 该热点 bin 内没有可移动单元，跳过
                 cx = (bin_xl + bin_xh) * 0.5
-                cy = (bin_yl + bin_yh) * 0.5
+                cy = (bin_yl + bin_yh) * 0.5# bin 的中心坐标
                 move_x = centers_x[in_bin] - cx
-                move_y = centers_y[in_bin] - cy
+                move_y = centers_y[in_bin] - cy# 每个单元中心到 bin 中心的向量（希望把单元往“远离”中心的方向推）
                 move_x = torch.sign(move_x).masked_fill(move_x == 0, 1.0)
-                move_y = torch.sign(move_y).masked_fill(move_y == 0, 1.0)
-                step_scale = 0.1 + 0.15 * float(value.item())
+                move_y = torch.sign(move_y).masked_fill(move_y == 0, 1.0) # 只取方向：sign >0 表示向 +x 推，<0 表示向 -x 推；等于 0 的设为 +1，避免不动
+                step_scale = 0.1 + 0.15 * float(value.item()) # 推动步长的比例系数：基础 0.1，再随热点风险值线性增大（风险越高推得稍远）。value ∈ [0,1]（前面风险图做过归一化），所以 step_scale 大致在 [0.1, 0.25]
                 delta_x = move_x * bin_size_x * step_scale
-                delta_y = move_y * bin_size_y * step_scale
-                indices_in_bin = in_bin.nonzero(as_tuple=False).view(-1)
+                delta_y = move_y * bin_size_y * step_scale# 实际位移量：以 bin 尺寸为尺度，按方向和强度推进
+                indices_in_bin = in_bin.nonzero(as_tuple=False).view(-1)# 将布尔掩码转为索引列表（这些索引都是“可移动单元”的局部索引 0..num_movable-1）
                 new_x = pos_view[0, indices_in_bin] + delta_x
-                new_y = pos_view[1, indices_in_bin] + delta_y
+                new_y = pos_view[1, indices_in_bin] + delta_y # 应用位移，得到新的左下角坐标（注意 pos_view 存的是单元左下角）
                 min_x = torch.full_like(new_x, float(placedb.xl))
-                min_y = torch.full_like(new_y, float(placedb.yl))
+                min_y = torch.full_like(new_y, float(placedb.yl))# 版图左下角，用于下界裁剪
                 size_x = node_size_x[indices_in_bin].to(device=new_x.device, dtype=new_x.dtype)
-                size_y = node_size_y[indices_in_bin].to(device=new_y.device, dtype=new_y.dtype)
+                size_y = node_size_y[indices_in_bin].to(device=new_y.device, dtype=new_y.dtype)# 取对应单元的宽高，并对齐 dtype/device
                 max_x = torch.full_like(new_x, float(placedb.xh)) - size_x
-                max_y = torch.full_like(new_y, float(placedb.yh)) - size_y
+                max_y = torch.full_like(new_y, float(placedb.yh)) - size_y# 上界裁剪时要保证“单元右/上边界不越界”，所以用 (xh - 宽, yh - 高)
                 new_x = torch.max(torch.min(new_x, max_x), min_x)
-                new_y = torch.max(torch.min(new_y, max_y), min_y)
+                new_y = torch.max(torch.min(new_y, max_y), min_y)# 将新坐标裁剪到合法范围内 [xl, xh-宽] / [yl, yh-高]
                 pos_view[0, indices_in_bin] = new_x
-                pos_view[1, indices_in_bin] = new_y
+                pos_view[1, indices_in_bin] = new_y# 回写位置（只影响可移动部分的这些索引）
                 updated = True
-        if updated:
-            logging.info(
-                "RASS hotspot repair -> threshold %.2f, bins touched %d, cells nudged %d",
-                threshold,
-                touched_bins,
-                moved_cells,
-            )
-        return updated
+        return updated # 返回是否进行了任何更新（True=至少推了一次；False=无事可做）
 
     def build_nctugr_congestion_map(self, params, placedb, data_collections):
         """
