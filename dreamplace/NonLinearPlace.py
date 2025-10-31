@@ -962,25 +962,38 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             max_disp,
         )
         if pin_metrics:
-            logging.info(
-                "Pin utilization overflow ratio: %.4f, Max pin utilization: %.4f",
-                pin_metrics["avg_overflow"],
-                pin_metrics["max_util"],
-            )
-            logging.info(
-                "Estimated high-risk pin bins (>1.5 capacity): %d (%.2f%%)",
-                pin_metrics["high_risk_bins"],
-                pin_metrics["high_risk_ratio"] * 100.0,
-            )
+            total_bins = pin_metrics.get("total_bins", 0)
+            if total_bins:
+                logging.info(
+                    "Pin overflow bins: %d / %d (max utilization %.4f)",
+                    pin_metrics["overflow_bins"],
+                    total_bins,
+                    pin_metrics["max_util"],
+                )
+            else:
+                logging.info(
+                    "Pin overflow bins: %d (max utilization %.4f)",
+                    pin_metrics["overflow_bins"],
+                    pin_metrics["max_util"],
+                )
         else:
             logging.info("Pin utilization metrics: N/A (pin utilization operator unavailable).")
 
         if route_metrics:
-            logging.info(
-                "Route utilization overflow ratio: %.4f, Max route overflow: %.4f",
-                route_metrics["avg_overflow"],
-                route_metrics["max_util"],
-            )
+            total_route_bins = route_metrics.get("total_bins", 0)
+            if total_route_bins:
+                logging.info(
+                    "Route overflow bins: %d / %d (max utilization %.4f)",
+                    route_metrics["overflow_bins"],
+                    total_route_bins,
+                    route_metrics["max_util"],
+                )
+            else:
+                logging.info(
+                    "Route overflow bins: %d (max utilization %.4f)",
+                    route_metrics["overflow_bins"],
+                    route_metrics["max_util"],
+                )
         else:
             logging.info("Route utilization metrics: N/A (route utilization operator unavailable).")
 
@@ -993,17 +1006,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         except Exception:
             return None
         overflow = torch.clamp(pin_map - 1.0, min=0.0)
-        avg_overflow = overflow.mean().item()
-        max_util = pin_map.max().item()
-        high_risk_mask = pin_map > 1.5
-        high_risk_bins = int(high_risk_mask.sum().item())
+        overflow_bins = int((overflow > 0).sum().item())
         total_bins = pin_map.numel()
-        high_risk_ratio = high_risk_bins / total_bins if total_bins else 0.0
+        max_util = pin_map.max().item()
         return {
-            "avg_overflow": avg_overflow,
+            "overflow_bins": overflow_bins,
+            "total_bins": total_bins,
             "max_util": max_util,
-            "high_risk_bins": high_risk_bins,
-            "high_risk_ratio": high_risk_ratio,
         }
 
     def _compute_route_metrics(self, params, placedb, pos_tensor):
@@ -1015,10 +1024,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         except Exception:
             return None
         overflow = torch.clamp(route_map - 1.0, min=0.0)
-        avg_overflow = overflow.mean().item()
+        overflow_bins = int((overflow > 0).sum().item())
+        total_bins = route_map.numel()
         max_util = route_map.max().item()
         return {
-            "avg_overflow": avg_overflow,
+            "overflow_bins": overflow_bins,
+            "total_bins": total_bins,
             "max_util": max_util,
         }
 
