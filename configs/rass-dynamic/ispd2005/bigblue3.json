@@ -37,7 +37,7 @@
     "rass_place_flag": 1,
     "rass_risk_weight": 0.045,
     "rass_risk_threshold": 0.76,
-    "rass_route_weight": 0.20,
+    "rass_route_weight": 0.2,
     "rass_pin_weight": 0.09,
     "rass_multiscale_weight": 0.16,
     "rass_adapt_flag": 1,
